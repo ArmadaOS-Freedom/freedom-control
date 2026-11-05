@@ -20,6 +20,7 @@ export const zhCN = {
   "options.eco": "节能",
   "options.balanced": "均衡",
   "options.performance": "性能",
+  "options.extreme": "极限",
   "options.conservative": "保守",
   "options.ondemand": "按需",
   "options.userspace": "用户空间",
