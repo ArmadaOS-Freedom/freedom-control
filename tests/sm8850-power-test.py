@@ -201,9 +201,9 @@ class DaemonConfigTest(unittest.TestCase):
         # fields absent from both chip and /etc keep the public factory values
         self.assertEqual(eco["label"], "Eco")
         self.assertEqual(eco["cpu_underclock"], "large")
-        self.assertAlmostEqual(eco["gpu_max"], 0.80)
+        self.assertAlmostEqual(eco["gpu_max"], 0.60)
         self.assertEqual(eco["fan_curve"], "relaxed")
-        self.assertAlmostEqual(balanced["cpu_max"], 1.0)
+        self.assertAlmostEqual(balanced["cpu_max"], 0.60)
         self.assertEqual(underclocks["SM8850"]["large"],
                          {0: 2112000, 6: 2438400})
 
@@ -212,9 +212,9 @@ class DaemonConfigTest(unittest.TestCase):
         power = self.daemon(soc="SM8750")
         (_default, underclocks, _curves, profiles,
          _fan, _suspend, _system) = power.parse_config()
-        self.assertEqual(profiles["eco"]["cpu_governor"], "conservative")
-        self.assertEqual(profiles["balanced"]["cpu_governor"], "conservative")
-        self.assertEqual(profiles["performance"]["cpu_governor"], "performance")
+        self.assertEqual(profiles["eco"]["cpu_governor"], "schedutil")
+        self.assertEqual(profiles["balanced"]["cpu_governor"], "schedutil")
+        self.assertEqual(profiles["performance"]["cpu_governor"], "schedutil")
         self.assertEqual(underclocks["SM8750"]["large"],
                          {0: 1785600, 6: 1958400})
         self.assertNotIn("SM8850", underclocks)
@@ -222,8 +222,8 @@ class DaemonConfigTest(unittest.TestCase):
     def test_missing_chip_file_keeps_the_public_factory(self):
         # no power-profiles-SM8850.conf in this fixture directory
         profiles = self.daemon().parse_config()[3]
-        self.assertEqual(profiles["eco"]["cpu_governor"], "conservative")
-        self.assertEqual(profiles["balanced"]["cpu_governor"], "conservative")
+        self.assertEqual(profiles["eco"]["cpu_governor"], "schedutil")
+        self.assertEqual(profiles["balanced"]["cpu_governor"], "schedutil")
 
     def test_cpu_max_cap_floors_the_policy_table(self):
         """The lower of the per-policy tier and the cpu_max ratio wins."""
@@ -293,30 +293,51 @@ class DaemonConfigTest(unittest.TestCase):
             self.assertLessEqual(tiers[("small", policy_id)],
                                  OPP[policy_id][-1])
 
-    def test_none_profile_uses_firmware_max(self):
+    def test_extreme_profile_uses_firmware_max(self):
         self.assertTrue(SM8850_PROFILES.is_file(),
                         f"missing chip factory file: {SM8850_PROFILES}")
         chip = configparser.ConfigParser()
         chip.read(SM8850_PROFILES)
-        if chip.has_section("profile.performance"):
+        if chip.has_section("profile.extreme"):
             self.assertFalse(
-                [key for key in chip.options("profile.performance")
+                [key for key in chip.options("profile.extreme")
                  if key.startswith("cpu_max_policy")],
-                "performance must not carry a policy table")
-
-        power = self.daemon(factory=PUBLIC_PROFILES)
-        (_default, underclocks, _curves, profiles,
-         _fan, _suspend, _system) = power.parse_config()
-        performance = profiles["performance"]
-        self.assertEqual(performance["cpu_underclock"], "none")
-        self.assertEqual(performance["cpu_max_policy"], {})
-
-        power.underclock_config = underclocks
-        power.profile = "performance"
-        for policy_id in (0, 6):
-            freqs = OPP[policy_id]
-            target = power.cpu_max_target(performance, policy_id, freqs)
+                "extreme must not carry a policy table")
+        for soc in ("SM8850", "SM8550", "SM8750"):
+            power = self.daemon(soc=soc, factory=PUBLIC_PROFILES, etc_text=(
+                "[profile.performance]\n"
+                "cpu_max_policy0=1234567\n"
+            ))
+            (_default, underclocks, _curves, profiles,
+             _fan, _suspend, _system) = power.parse_config()
+            performance = profiles["performance"]
+            extreme = profiles["extreme"]
+            self.assertEqual(performance["cpu_max_policy"], {0: 1234567})
+            self.assertEqual(extreme["cpu_max_policy"], {})
+            power.underclock_config = underclocks
+            power.profile = "extreme"
+            freqs = OPP[0]
+            target = power.cpu_max_target(extreme, 0, freqs)
             self.assertEqual(power.choose_at_most(freqs, target), freqs[-1])
+
+    def test_explicit_extreme_fields_are_preserved(self):
+        power = self.daemon(etc_text=(
+            "[profile.performance]\n"
+            "cpu_max_policy0=1234567\n"
+            "\n"
+            "[profile.extreme]\n"
+            "label=Custom Extreme\n"
+            "cpu_max_policy0=2000000\n"
+            "vendor_extra=keep\n"
+        ))
+        config = configparser.ConfigParser()
+        config.read(POWERD.FACTORY_CONFIG_FILE)
+        config.read(POWERD.CONFIG_FILE)
+        POWERD.ensure_extreme_profile(config)
+        self.assertEqual(config.get("profile.extreme", "label"), "Custom Extreme")
+        self.assertEqual(config.get("profile.extreme", "cpu_max_policy0"), "2000000")
+        self.assertEqual(config.get("profile.extreme", "vendor_extra"), "keep")
+        power.parse_config()
 
     def test_board_profile_primes_are_6_7(self):
         self.assertTrue(BOARD_PROFILE.is_file())
@@ -329,6 +350,81 @@ class DaemonConfigTest(unittest.TestCase):
         global_tweaks = json.loads(GAME_TWEAKS.read_text(encoding="utf-8"))["global"]
         self.assertIsNone(global_tweaks.get("cores"))
         self.assertIsNone(global_tweaks.get("gamescopeCores"))
+
+    def test_shared_defaults_cover_supported_soc_classes(self):
+        expected = {
+            "eco": ("schedutil", 0.40, "large", 0.60, 0.00, "relaxed"),
+            "balanced": ("schedutil", 0.60, "medium", 0.80, 0.00, "moderate"),
+            "performance": ("schedutil", 0.80, "small", 1.00, 0.00, "aggressive"),
+            "extreme": ("performance", 1.00, "none", 1.00, 0.60, "aggressive"),
+        }
+        keys = ("cpu_governor", "cpu_max", "cpu_underclock",
+                "gpu_max", "gpu_min", "fan_curve")
+        for soc in ("SM8550", "SM8650", "SM8750", "SM8850"):
+            power = self.daemon(soc=soc, factory=PUBLIC_PROFILES)
+            result = power.parse_config()
+            self.assertEqual(result[0], "balanced")
+            profiles = result[3]
+            self.assertEqual(set(profiles), {"eco", "balanced", "performance", "extreme"})
+            for name, fields in expected.items():
+                self.assertEqual(tuple(profiles[name][key] for key in keys), fields)
+
+    def test_old_three_profile_config_synthesizes_extreme(self):
+        config = configparser.ConfigParser()
+        config.read(self.factory)
+        config.remove_section("profile.extreme")
+        with self.factory.open("w", encoding="utf-8") as handle:
+            config.write(handle)
+        self.write_chip()
+        self.daemon(etc_text=(
+            "[profile.eco]\n"
+            "cpu_max=0.50\n"
+            "\n"
+            "[profile.performance]\n"
+            "cpu_max_policy0=1234567\n"
+        ))
+        (_default, _under, _curves, profiles,
+         _fan, _suspend, _system) = POWERD.ArmadaPower.parse_config(self.daemon())
+        self.assertIn("extreme", profiles)
+        self.assertEqual(profiles["extreme"]["label"], "Extreme")
+        self.assertEqual(profiles["extreme"]["cpu_governor"],
+                         profiles["performance"]["cpu_governor"])
+        self.assertAlmostEqual(profiles["extreme"]["cpu_max"],
+                               profiles["performance"]["cpu_max"])
+        self.assertEqual(profiles["extreme"]["fan_curve"],
+                         profiles["performance"]["fan_curve"])
+        self.assertEqual(profiles["extreme"]["cpu_max_policy"], {0: 1234567})
+        self.assertEqual(profiles["performance"]["label"], "Performance")
+        self.assertEqual(self.daemon().parse_config()[0], "balanced")
+
+    def test_partial_extreme_override_inherits_performance(self):
+        config = configparser.ConfigParser()
+        config.read(self.factory)
+        config.remove_section("profile.extreme")
+        with self.factory.open("w", encoding="utf-8") as handle:
+            config.write(handle)
+        self.write_chip()
+        power = self.daemon(etc_text=(
+            "[general]\n"
+            "default_profile=extreme\n"
+            "\n"
+            "[profile.performance]\n"
+            "cpu_max_policy0=1234567\n"
+            "\n"
+            "[profile.extreme]\n"
+            "cpu_max=0.50\n"
+        ))
+        (default, _under, _curves, profiles,
+         _fan, _suspend, _system) = power.parse_config()
+        self.assertEqual(default, "extreme")
+        self.assertAlmostEqual(profiles["extreme"]["cpu_max"], 0.50)
+        self.assertEqual(profiles["extreme"]["cpu_governor"],
+                         profiles["performance"]["cpu_governor"])
+        self.assertAlmostEqual(profiles["extreme"]["gpu_max"],
+                               profiles["performance"]["gpu_max"])
+        self.assertEqual(profiles["extreme"]["fan_curve"],
+                         profiles["performance"]["fan_curve"])
+        self.assertEqual(profiles["extreme"]["cpu_max_policy"], {})
 
 
 class PluginConfigTest(unittest.TestCase):
@@ -366,8 +462,19 @@ class PluginConfigTest(unittest.TestCase):
             self.assertEqual(parsed["profiles"]["performance"]["cpu_governor"],
                              "performance")
         # the chip layer is partial: public factory fields survive
-        self.assertEqual(data["profiles"]["eco"]["cpu_max"], "0.65")
+        self.assertEqual(data["profiles"]["eco"]["cpu_max"], "0.40")
         self.assertEqual(data["profiles"]["eco"]["label"], "Eco")
+
+    def test_plugin_helper_keeps_independent_factory_extreme(self):
+        self.write_etc("[profile.performance]\ncpu_max_policy0=1234567\n")
+        merged = configparser.ConfigParser()
+        merged.read([self.factory, self.etc])
+        PLUGIN_POWER.ensure_extreme_profile(merged)
+        self.assertEqual(merged.get("profile.performance", "cpu_max_policy0"), "1234567")
+        self.assertFalse(merged.has_option("profile.extreme", "cpu_max_policy0"))
+        self.assertEqual(merged.get("profile.extreme", "label"), "Extreme")
+        parsed = PLUGIN_POWER.parse_power()
+        self.assertEqual(float(parsed["profiles"]["extreme"]["cpu_max"]), 1.0)
 
     def test_user_override_does_not_pollute_restore_defaults(self):
         self.write_etc("[profile.eco]\ncpu_governor=performance\n")
@@ -413,6 +520,67 @@ class PluginConfigTest(unittest.TestCase):
         self.assertEqual(edited.get("profile.eco", "cpu_max"), "0.50")
         self.assertEqual(edited.get("profile.eco", "custom_extra"),
                          "hand-edited")
+
+
+    def test_extreme_roundtrip_and_factory_restore(self):
+        self.write_etc(
+            "[general]\n"
+            "default_profile=balanced\n"
+            "\n"
+            "[profile.performance]\n"
+            "cpu_max=0.80\n"
+            "cpu_max_policy0=1234567\n"
+            "unknown_perf_note=keep\n"
+            "\n"
+            "[profile.extreme]\n"
+            "cpu_max=0.75\n"
+            "vendor_extra=keep-extreme\n"
+        )
+        parsed = PLUGIN_POWER.parse_power()
+        self.assertEqual(parsed["general"]["default_profile"], "balanced")
+        self.assertEqual(parsed["profiles"]["performance"]["cpu_max"], "0.80")
+        self.assertEqual(parsed["profiles"]["extreme"]["cpu_max"], "0.75")
+
+        data = PLUGIN_POWER.parse_power()
+        data["profiles"]["extreme"]["gpu_max"] = "0.95"
+        data["general"]["default_profile"] = "extreme"
+        self.write_etc(PLUGIN_POWER.render_power(data, PLUGIN_POWER.factory_power_defaults()))
+        reread = PLUGIN_POWER.parse_power()
+        self.assertEqual(reread["general"]["default_profile"], "extreme")
+        self.assertEqual(reread["profiles"]["extreme"]["gpu_max"], "0.95")
+        for name in ("eco", "balanced", "performance"):
+            self.assertEqual(
+                PLUGIN_POWER.profile_overrides(reread["profiles"][name]),
+                PLUGIN_POWER.profile_overrides(data["profiles"][name]))
+
+        raw = configparser.ConfigParser()
+        raw.read(self.etc)
+        self.assertEqual(raw.get("profile.performance", "unknown_perf_note"), "keep")
+        self.assertEqual(raw.get("profile.performance", "cpu_max_policy0"), "1234567")
+        self.assertEqual(raw.get("profile.extreme", "vendor_extra"), "keep-extreme")
+
+        merged = configparser.ConfigParser()
+        merged.read([self.factory, self.etc])
+        PLUGIN_POWER.ensure_extreme_profile(merged)
+        self.assertFalse(merged.has_option("profile.extreme", "cpu_max_policy0"))
+
+        factory = PLUGIN_POWER.factory_power_defaults()
+        reread["profiles"]["extreme"] = dict(factory["profiles"]["extreme"])
+        self.write_etc(PLUGIN_POWER.render_power(reread, factory))
+        reread = PLUGIN_POWER.parse_power()
+        self.assertEqual(float(reread["profiles"]["extreme"]["cpu_max"]), 1.0)
+        self.assertEqual(reread["profiles"]["performance"]["cpu_max"], "0.80")
+        self.assertEqual(reread["general"]["default_profile"], "extreme")
+
+        raw = configparser.ConfigParser()
+        raw.read(self.etc)
+        self.assertEqual(raw.get("profile.performance", "unknown_perf_note"), "keep")
+        self.assertEqual(raw.get("profile.performance", "cpu_max_policy0"), "1234567")
+        self.assertEqual(raw.get("profile.extreme", "vendor_extra"), "keep-extreme")
+        merged = configparser.ConfigParser()
+        merged.read([self.factory, self.etc])
+        PLUGIN_POWER.ensure_extreme_profile(merged)
+        self.assertFalse(merged.has_option("profile.extreme", "cpu_max_policy0"))
 
 
 if __name__ == "__main__":

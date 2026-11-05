@@ -105,6 +105,29 @@ test("preserves custom labels while translating other native profiles", () => {
   assert.equal(localized[0], options[0]);
 });
 
+test("translates Extreme while keeping data and custom labels", () => {
+  const options = [
+    ...nativeOptions(),
+    { data: "Extreme", label: "Extreme", icon: "extreme.svg" },
+  ];
+  const localized = localizePerformanceProfileOptions(options, "zh-CN");
+  assert.ok(localized);
+  assert.deepEqual(localized.map((option) => option.label), ["节能", "均衡", "性能", "极限"]);
+  assert.deepEqual(localized.map((option) => option.data), ["Eco", "Balanced", "Performance", "Extreme"]);
+  assert.equal(localized[3].icon, "extreme.svg");
+  assert.equal(options[3].label, "Extreme");
+
+  const custom = [
+    { data: "Extreme", label: "My Extreme" },
+    { data: "Performance", label: "Performance" },
+  ];
+  const untouched = localizePerformanceProfileOptions(custom, "zh-CN");
+  assert.ok(untouched);
+  assert.equal(untouched[0], custom[0]);
+  assert.equal(untouched[0].label, "My Extreme");
+  assert.equal(untouched[1].label, "性能");
+});
+
 test("preserves unknown profile data while translating known profiles", () => {
   const options = nativeOptions();
   options[2] = { data: "Turbo", label: "Turbo", icon: "turbo.svg" };

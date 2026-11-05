@@ -5,7 +5,7 @@ export type PerformanceProfileOption = {
   label?: unknown;
 };
 
-const NATIVE_PROFILE_IDS = ["Eco", "Balanced", "Performance"] as const;
+const NATIVE_PROFILE_IDS = ["Eco", "Balanced", "Performance", "Extreme"] as const;
 const NATIVE_PROFILE_ID_SET: ReadonlySet<string> = new Set(NATIVE_PROFILE_IDS);
 
 export function localizePerformanceProfileOptions<T extends PerformanceProfileOption>(

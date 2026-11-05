@@ -9,7 +9,7 @@ from .system import device_env
 
 POWER_CONFIG = Path("/etc/armada/power-profiles.conf")
 FACTORY_POWER_CONFIG = Path("/usr/share/armada/power-profiles.conf")
-PROFILES = ("eco", "balanced", "performance")
+PROFILES = ("eco", "balanced", "performance", "extreme")
 
 
 def default_label(name):
@@ -60,6 +60,31 @@ def parse_power(path=None, repair=True):
         raise
 
 
+def ensure_extreme_profile(parser):
+    # Old three-profile configs stay valid: synthesize [profile.extreme] from the
+    # effective performance section. An existing extreme section is independent:
+    # only fill missing required fields, never optional per-policy caps.
+    section = "profile.extreme"
+    absent = not parser.has_section(section)
+    if absent:
+        parser.add_section(section)
+        if not parser.has_option(section, "label"):
+            parser.set(section, "label", "Extreme")
+    if parser.has_section("profile.performance"):
+        if absent:
+            source = list(parser.items("profile.performance"))
+        else:
+            source = [(key, parser.get("profile.performance", key))
+                      for key in ("cpu_governor", "cpu_max", "cpu_underclock",
+                                  "gpu_max", "gpu_min", "fan_curve")
+                      if parser.has_option("profile.performance", key)]
+        for key, value in source:
+            if not parser.has_option(section, key):
+                parser.set(section, key, value)
+    if not parser.has_option(section, "label"):
+        parser.set(section, "label", "Extreme")
+
+
 def parsed_power(parser):
     for section in ("general", "fan"):
         if not parser.has_section(section):
@@ -71,6 +96,7 @@ def parsed_power(parser):
         "fan": {},
         "underclocks": {},
     }
+    ensure_extreme_profile(parser)
     for name in PROFILES:
         section = f"profile.{name}"
         if not parser.has_section(section):
@@ -134,7 +160,8 @@ def render_power(data, factory):
                  data["general"]["default_profile"] != factory["general"]["default_profile"])
     for name in PROFILES:
         overrides = profile_overrides(data["profiles"][name])
-        edited = overrides != profile_overrides(factory["profiles"][name])
+        edited = (overrides != profile_overrides(factory["profiles"][name])
+                  or name == "extreme")
         for key in EDITABLE_KEYS:
             set_or_clear(parser, f"profile.{name}", key, overrides[key], edited)
 

@@ -3,6 +3,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from .power import ensure_extreme_profile
 from .privileged import call
 from .fan_sensors import get_current_temp
 
@@ -12,7 +13,7 @@ POWER_CONFIG = Path("/etc/armada/power-profiles.conf")
 FACTORY_POWER_CONFIG = Path("/usr/share/armada/power-profiles.conf")
 # Profile armada-powerd is actually running (may differ from [general] default_profile).
 STATE_FILE = Path("/var/lib/armada/powerd.state")
-PROFILE_NAMES = ("eco", "balanced", "performance")
+PROFILE_NAMES = ("eco", "balanced", "performance", "extreme")
 
 CURVE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 CURVE_POINT_RE = re.compile(r"^-?\d{1,3}:\d{1,3}$")
@@ -67,6 +68,9 @@ def _parse_fan_curves(parser):
 
 
 def _parse_profile_summary(parser):
+    # Legacy configs (no extreme section) still expose the synthetic extreme
+    # profile the daemon/plugin derive, so summaries stay consistent.
+    ensure_extreme_profile(parser)
     profiles = {}
     for name in PROFILE_NAMES:
         section = f"profile.{name}"
