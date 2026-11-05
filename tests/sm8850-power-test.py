@@ -303,20 +303,41 @@ class DaemonConfigTest(unittest.TestCase):
                 [key for key in chip.options("profile.extreme")
                  if key.startswith("cpu_max_policy")],
                 "extreme must not carry a policy table")
-
-        power = self.daemon(factory=PUBLIC_PROFILES)
-        (_default, underclocks, _curves, profiles,
-         _fan, _suspend, _system) = power.parse_config()
-        extreme = profiles["extreme"]
-        self.assertEqual(extreme["cpu_underclock"], "none")
-        self.assertEqual(extreme["cpu_max_policy"], {})
-
-        power.underclock_config = underclocks
-        power.profile = "extreme"
-        for policy_id in (0, 6):
-            freqs = OPP[policy_id]
-            target = power.cpu_max_target(extreme, policy_id, freqs)
+        for soc in ("SM8850", "SM8550", "SM8750"):
+            power = self.daemon(soc=soc, factory=PUBLIC_PROFILES, etc_text=(
+                "[profile.performance]\n"
+                "cpu_max_policy0=1234567\n"
+            ))
+            (_default, underclocks, _curves, profiles,
+             _fan, _suspend, _system) = power.parse_config()
+            performance = profiles["performance"]
+            extreme = profiles["extreme"]
+            self.assertEqual(performance["cpu_max_policy"], {0: 1234567})
+            self.assertEqual(extreme["cpu_max_policy"], {})
+            power.underclock_config = underclocks
+            power.profile = "extreme"
+            freqs = OPP[0]
+            target = power.cpu_max_target(extreme, 0, freqs)
             self.assertEqual(power.choose_at_most(freqs, target), freqs[-1])
+
+    def test_explicit_extreme_fields_are_preserved(self):
+        power = self.daemon(etc_text=(
+            "[profile.performance]\n"
+            "cpu_max_policy0=1234567\n"
+            "\n"
+            "[profile.extreme]\n"
+            "label=Custom Extreme\n"
+            "cpu_max_policy0=2000000\n"
+            "vendor_extra=keep\n"
+        ))
+        config = configparser.ConfigParser()
+        config.read(POWERD.FACTORY_CONFIG_FILE)
+        config.read(POWERD.CONFIG_FILE)
+        POWERD.ensure_extreme_profile(config)
+        self.assertEqual(config.get("profile.extreme", "label"), "Custom Extreme")
+        self.assertEqual(config.get("profile.extreme", "cpu_max_policy0"), "2000000")
+        self.assertEqual(config.get("profile.extreme", "vendor_extra"), "keep")
+        power.parse_config()
 
     def test_board_profile_primes_are_6_7(self):
         self.assertTrue(BOARD_PROFILE.is_file())
@@ -355,7 +376,13 @@ class DaemonConfigTest(unittest.TestCase):
         with self.factory.open("w", encoding="utf-8") as handle:
             config.write(handle)
         self.write_chip()
-        self.daemon(etc_text="[profile.eco]\ncpu_max=0.50\n")
+        self.daemon(etc_text=(
+            "[profile.eco]\n"
+            "cpu_max=0.50\n"
+            "\n"
+            "[profile.performance]\n"
+            "cpu_max_policy0=1234567\n"
+        ))
         (_default, _under, _curves, profiles,
          _fan, _suspend, _system) = POWERD.ArmadaPower.parse_config(self.daemon())
         self.assertIn("extreme", profiles)
@@ -366,6 +393,7 @@ class DaemonConfigTest(unittest.TestCase):
                                profiles["performance"]["cpu_max"])
         self.assertEqual(profiles["extreme"]["fan_curve"],
                          profiles["performance"]["fan_curve"])
+        self.assertEqual(profiles["extreme"]["cpu_max_policy"], {0: 1234567})
         self.assertEqual(profiles["performance"]["label"], "Performance")
         self.assertEqual(self.daemon().parse_config()[0], "balanced")
 
@@ -380,6 +408,9 @@ class DaemonConfigTest(unittest.TestCase):
             "[general]\n"
             "default_profile=extreme\n"
             "\n"
+            "[profile.performance]\n"
+            "cpu_max_policy0=1234567\n"
+            "\n"
             "[profile.extreme]\n"
             "cpu_max=0.50\n"
         ))
@@ -393,6 +424,7 @@ class DaemonConfigTest(unittest.TestCase):
                                profiles["performance"]["gpu_max"])
         self.assertEqual(profiles["extreme"]["fan_curve"],
                          profiles["performance"]["fan_curve"])
+        self.assertEqual(profiles["extreme"]["cpu_max_policy"], {})
 
 
 class PluginConfigTest(unittest.TestCase):
@@ -432,6 +464,17 @@ class PluginConfigTest(unittest.TestCase):
         # the chip layer is partial: public factory fields survive
         self.assertEqual(data["profiles"]["eco"]["cpu_max"], "0.40")
         self.assertEqual(data["profiles"]["eco"]["label"], "Eco")
+
+    def test_plugin_helper_keeps_independent_factory_extreme(self):
+        self.write_etc("[profile.performance]\ncpu_max_policy0=1234567\n")
+        merged = configparser.ConfigParser()
+        merged.read([self.factory, self.etc])
+        PLUGIN_POWER.ensure_extreme_profile(merged)
+        self.assertEqual(merged.get("profile.performance", "cpu_max_policy0"), "1234567")
+        self.assertFalse(merged.has_option("profile.extreme", "cpu_max_policy0"))
+        self.assertEqual(merged.get("profile.extreme", "label"), "Extreme")
+        parsed = PLUGIN_POWER.parse_power()
+        self.assertEqual(float(parsed["profiles"]["extreme"]["cpu_max"]), 1.0)
 
     def test_user_override_does_not_pollute_restore_defaults(self):
         self.write_etc("[profile.eco]\ncpu_governor=performance\n")
@@ -486,6 +529,7 @@ class PluginConfigTest(unittest.TestCase):
             "\n"
             "[profile.performance]\n"
             "cpu_max=0.80\n"
+            "cpu_max_policy0=1234567\n"
             "unknown_perf_note=keep\n"
             "\n"
             "[profile.extreme]\n"
@@ -512,7 +556,13 @@ class PluginConfigTest(unittest.TestCase):
         raw = configparser.ConfigParser()
         raw.read(self.etc)
         self.assertEqual(raw.get("profile.performance", "unknown_perf_note"), "keep")
+        self.assertEqual(raw.get("profile.performance", "cpu_max_policy0"), "1234567")
         self.assertEqual(raw.get("profile.extreme", "vendor_extra"), "keep-extreme")
+
+        merged = configparser.ConfigParser()
+        merged.read([self.factory, self.etc])
+        PLUGIN_POWER.ensure_extreme_profile(merged)
+        self.assertFalse(merged.has_option("profile.extreme", "cpu_max_policy0"))
 
         factory = PLUGIN_POWER.factory_power_defaults()
         reread["profiles"]["extreme"] = dict(factory["profiles"]["extreme"])
@@ -525,7 +575,12 @@ class PluginConfigTest(unittest.TestCase):
         raw = configparser.ConfigParser()
         raw.read(self.etc)
         self.assertEqual(raw.get("profile.performance", "unknown_perf_note"), "keep")
+        self.assertEqual(raw.get("profile.performance", "cpu_max_policy0"), "1234567")
         self.assertEqual(raw.get("profile.extreme", "vendor_extra"), "keep-extreme")
+        merged = configparser.ConfigParser()
+        merged.read([self.factory, self.etc])
+        PLUGIN_POWER.ensure_extreme_profile(merged)
+        self.assertFalse(merged.has_option("profile.extreme", "cpu_max_policy0"))
 
 
 if __name__ == "__main__":
