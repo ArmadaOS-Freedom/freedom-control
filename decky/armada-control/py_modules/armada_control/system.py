@@ -9,6 +9,7 @@ from .proc import clean_env
 
 OS_VERSION_PATH = Path("/usr/lib/armada/version")
 MEM_SLEEP_PATH = Path("/sys/power/mem_sleep")
+MODULES_ROOT = Path("/usr/lib/modules")
 SLEEP_DEBUG_COMMAND = Path("/usr/bin/armada-sleep-debug")
 SLEEP_DEBUG_MODULE = Path("/usr/lib/armada/armada_sleep_debug.py")
 SLEEP_LOG_HOOK_SOURCE = Path(__file__).with_name("sleep_debug_hook.sh")
@@ -31,6 +32,17 @@ FAN_MODE_COMMAND = [
     "org.armada.Power1",
     "FanMode",
 ]
+
+
+def kernel_default_scheduler():
+    # Same tiny protocol as armada_perf.kernel_default_scheduler: marker for
+    # the running kernel's release decides; anything else means eevdf.
+    marker = MODULES_ROOT / os.uname().release / "freedom-scheduler"
+    try:
+        content = marker.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return "eevdf"
+    return "infinity" if content.strip() == "infinity-v1" else "eevdf"
 
 
 def run_cmd(cmd, timeout=5, capture=True):
@@ -278,7 +290,7 @@ def perf_info():
         # writer; nothing on the image writes it, so it would freeze clocks.
         if g != "userspace"
     ]
-    schedulers = ["eevdf"] + [
+    schedulers = [kernel_default_scheduler()] + [
         name for name in ("cosmos", "lavd") if Path(f"/usr/bin/scx_{name}").exists()
     ]
     env = device_env()

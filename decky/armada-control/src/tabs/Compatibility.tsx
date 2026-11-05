@@ -21,6 +21,7 @@ import { getCurrentLocale, t, translateLabel } from "../i18n";
 import { findPreset, localized, resolveEnvValues } from "../lib/envPresets";
 import { getGlobalResolution, setGlobalResolution } from "../lib/steamSettings";
 import { clone } from "../lib/util";
+import { normalizeSchedulerSelection } from "../lib/schedulerSelection";
 import { availableGames, editTargetOptions } from "../lib/games";
 import {
   FOLLOW_STEAM_COMPAT,
@@ -651,9 +652,13 @@ export function Compatibility({ config, setConfig }: { config: Config; setConfig
     setCoresDraft(null);
     patchSettings({ cores: id || undefined });
   };
+  const availableSchedulers = perf?.schedulers || ["eevdf"];
   const schedulerOptions = [
     { data: "", label: t("common.default") },
-    ...(perf?.schedulers || ["eevdf"]).map((name) => ({ data: name, label: name.toUpperCase() })),
+    ...availableSchedulers.map((name) => ({
+      data: name,
+      label: name === "infinity" ? "Infinity" : name.toUpperCase(),
+    })),
   ];
   const gamescopeCoreOptions = [
     { data: "", label: t("common.default") },
@@ -799,7 +804,7 @@ export function Compatibility({ config, setConfig }: { config: Config; setConfig
       <div className="armada-subheader">{t("settings.system")}</div>
       <SelectEdit
         label={t("compatibility.cpuScheduler")}
-        value={String(values.scheduler ?? "")}
+        value={normalizeSchedulerSelection(values.scheduler, availableSchedulers)}
         options={schedulerOptions}
         onChange={(v) => patchSettings({ scheduler: String(v) || undefined })}
       />
