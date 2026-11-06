@@ -164,6 +164,8 @@ export interface Config {
   swipeGesturesEnabled: boolean;
   swipeGesturesInGameEnabled: boolean;
   mtpEnabled: boolean;
+  usbNetworkEnabled: boolean;
+  usbNetworkSupported: boolean;
   desktopMode: string;
   desktopModes: DropdownChoice[];
   sleepMode: string;

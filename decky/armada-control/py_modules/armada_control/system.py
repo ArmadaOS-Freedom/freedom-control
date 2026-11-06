@@ -115,6 +115,17 @@ def mtp_enabled():
     return active_s == "active"
 
 
+def usb_network_state():
+    # Images without the USB network link answer with an unknown action: hide the switch.
+    try:
+        state = call("get_usb_network_enabled")
+    except RuntimeError as exc:
+        if str(exc) != "unknown action":
+            raise
+        return {"enabled": False, "supported": False}
+    return {"enabled": bool(state.get("enabled")), "supported": bool(state.get("supported"))}
+
+
 def os_version():
     return read_text(OS_VERSION_PATH) or "unknown"
 
@@ -158,6 +169,10 @@ def set_ssh_enabled(enabled):
 
 def set_mtp_enabled(enabled):
     return bool(call("set_mtp_enabled", enabled=bool(enabled)).get("enabled"))
+
+
+def set_usb_network_enabled(enabled):
+    return bool(call("set_usb_network_enabled", enabled=bool(enabled)).get("enabled"))
 
 
 def bottom_screen_enabled():
