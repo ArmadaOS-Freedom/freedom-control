@@ -59,6 +59,8 @@ export const zhCN = {
   "settings.swipeGesturesInGame": "游戏中启用滑动手势",
   "settings.swipeGesturesInGameError": "无法更改游戏内滑动手势",
   "settings.enableSsh": "启用 SSH",
+  "settings.usbNetwork": "USB 网络",
+  "settings.usbNetworkDescription": "通过 USB 线以 172.16.42.1 进行 SSH，仅限密钥登录",
   "settings.osVersion": "系统版本",
   "common.unknown": "未知",
   "settings.experimental": "实验性功能",

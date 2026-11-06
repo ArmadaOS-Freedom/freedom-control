@@ -28,6 +28,7 @@ from armada_control.system import (
     set_ssh_enabled,
     set_swipe_gestures_enabled,
     set_swipe_gestures_in_game_enabled,
+    set_usb_network_enabled,
     suspend_swipe_gestures,
 )
 from armada_control.tweaks import load_compat_applied, save_compat_applied, save_tweaks
@@ -110,6 +111,9 @@ class Plugin:
 
     async def set_mtp_enabled(self, enabled):
         return await asyncio.to_thread(set_mtp_enabled, enabled)
+
+    async def set_usb_network_enabled(self, enabled):
+        return await asyncio.to_thread(set_usb_network_enabled, enabled)
 
     async def set_bottom_screen_enabled(self, enabled):
         return await asyncio.to_thread(set_bottom_screen_enabled, enabled)

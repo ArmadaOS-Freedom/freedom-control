@@ -17,6 +17,7 @@ import {
   setSshEnabled as applySshEnabled,
   setSwipeGesturesEnabled as applySwipeGesturesEnabled,
   setSwipeGesturesInGameEnabled as applySwipeGesturesInGameEnabled,
+  setUsbNetworkEnabled as applyUsbNetworkEnabled,
 } from "../backend";
 import { openCalibration } from "../components/Calibration";
 import { HomePowerSetting } from "../components/HomePowerSetting";
@@ -106,6 +107,18 @@ export function Settings({ config, setConfig }: {
       setConfig((current) => (current ? { ...current, mtpEnabled: applied } : current));
     } catch (error) {
       setConfig((current) => (current ? { ...current, mtpEnabled: !enabled } : current));
+    }
+  };
+  const setUsbNetworkEnabled = async (enabled: boolean) => {
+    if (enabled === !!config.usbNetworkEnabled) {
+      return;
+    }
+    setConfig((current) => (current ? { ...current, usbNetworkEnabled: enabled } : current));
+    try {
+      const applied = await applyUsbNetworkEnabled(enabled);
+      setConfig((current) => (current ? { ...current, usbNetworkEnabled: applied } : current));
+    } catch (error) {
+      setConfig((current) => (current ? { ...current, usbNetworkEnabled: !enabled } : current));
     }
   };
   const setControllerType = async (value: string) => {
@@ -223,6 +236,14 @@ export function Settings({ config, setConfig }: {
           onChange={setSleepMode}
         />
         <ToggleRow label={t("settings.enableSsh")} value={!!config.sshEnabled} onChange={setSshEnabled} />
+        {config.usbNetworkSupported && (
+          <ToggleRow
+            label={t("settings.usbNetwork")}
+            description={t("settings.usbNetworkDescription")}
+            value={!!config.usbNetworkEnabled}
+            onChange={setUsbNetworkEnabled}
+          />
+        )}
         <Field label={t("settings.osVersion")} description={config.osVersion || t("common.unknown")} />
       </PanelSection>
       <PanelSection title={t("settings.experimental")}>

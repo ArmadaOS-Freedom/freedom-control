@@ -57,6 +57,8 @@ export const en = {
   "settings.swipeGesturesInGame": "Enable swipe gestures in games",
   "settings.swipeGesturesInGameError": "Could not change in-game swipe gestures",
   "settings.enableSsh": "Enable SSH",
+  "settings.usbNetwork": "USB Network",
+  "settings.usbNetworkDescription": "SSH over the USB cable at 172.16.42.1, key login only",
   "settings.osVersion": "OS Version",
   "common.unknown": "unknown",
   "settings.experimental": "Experimental",

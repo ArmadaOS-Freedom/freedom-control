@@ -59,6 +59,8 @@ export const ptPT = {
   "settings.swipeGesturesInGame": "Ativar gestos de deslizar nos jogos",
   "settings.swipeGesturesInGameError": "Não foi possível alterar os gestos de deslizar nos jogos",
   "settings.enableSsh": "Ativar SSH",
+  "settings.usbNetwork": "Rede USB",
+  "settings.usbNetworkDescription": "SSH pelo cabo USB em 172.16.42.1, apenas com chave",
   "settings.osVersion": "Versão do SO",
   "common.unknown": "desconhecido",
   "settings.experimental": "Experimental",

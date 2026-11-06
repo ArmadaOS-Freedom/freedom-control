@@ -17,6 +17,7 @@ from .system import (
     ssh_enabled,
     swipe_gestures_enabled,
     swipe_gestures_in_game_enabled,
+    usb_network_state,
 )
 from .tweaks import (
     fex_profile_labels,
@@ -31,6 +32,7 @@ def build_config(include_games=True):
     fex_contract = load_fex_contract()
     env = device_env()
     secondary_brightness = bottom_screen_brightness()
+    usb_network = usb_network_state()
     power = parse_power()
     return {
         "power": power,
@@ -63,6 +65,8 @@ def build_config(include_games=True):
         "swipeGesturesEnabled": swipe_gestures_enabled(),
         "swipeGesturesInGameEnabled": swipe_gestures_in_game_enabled(),
         "mtpEnabled": mtp_enabled(),
+        "usbNetworkEnabled": usb_network["enabled"],
+        "usbNetworkSupported": usb_network["supported"],
         "desktopMode": desktop_mode(),
         "desktopModes": desktop_modes(),
         "sleepMode": env.get("ARMADA_SUSPEND_MODE", "s2idle"),
