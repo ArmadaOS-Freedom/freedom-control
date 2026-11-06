@@ -1,6 +1,6 @@
 import { toaster } from "@decky/api";
 import { ButtonItem, Field, PanelSection } from "@decky/ui";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
   getBottomScreenActive,
@@ -39,6 +39,8 @@ export function Settings({ config, setConfig }: {
   const [swipeGesturesInGameSaving, setSwipeGesturesInGameSaving] = useState(false);
   const [sleepLogsEnabled, setSleepLogsEnabled] = useState<boolean | null>(null);
   const [sleepLogsSaving, setSleepLogsSaving] = useState(false);
+  const usbSettingsBusy = useRef(false);
+  const [usbSettingsSaving, setUsbSettingsSaving] = useState(false);
   const setBottomScreenBrightness = useDebouncedApply(
     async () => (await getConfig()).bottomScreenBrightness,
     (value) => setConfig((current) => (current ? { ...current, bottomScreenBrightness: value } : current)),
@@ -97,28 +99,47 @@ export function Settings({ config, setConfig }: {
       setConfig((current) => (current ? { ...current, sshEnabled: !enabled } : current));
     }
   };
-  const setMtpEnabled = async (enabled: boolean) => {
-    if (enabled === !!config.mtpEnabled) {
-      return;
+  const refreshUsbSettings = async () => {
+    try {
+      const saved = await getConfig();
+      setConfig((current) => (current ? {
+        ...current,
+        usbNetworkEnabled: saved.usbNetworkEnabled,
+        usbNetworkSupported: saved.usbNetworkSupported,
+        mtpEnabled: saved.mtpEnabled,
+      } : current));
+    } catch (error) {
+      // Keep the previous values when the refresh itself fails.
     }
-    setConfig((current) => (current ? { ...current, mtpEnabled: enabled } : current));
+  };
+  const setMtpEnabled = async (enabled: boolean) => {
+    if (usbSettingsBusy.current) return;
+    usbSettingsBusy.current = true;
+    setUsbSettingsSaving(true);
     try {
       const applied = await applyMtpEnabled(enabled);
       setConfig((current) => (current ? { ...current, mtpEnabled: applied } : current));
     } catch (error) {
-      setConfig((current) => (current ? { ...current, mtpEnabled: !enabled } : current));
+      await refreshUsbSettings();
+      toaster.toast({ title: t("settings.usbSettingsError"), body: String(error) });
+    } finally {
+      usbSettingsBusy.current = false;
+      setUsbSettingsSaving(false);
     }
   };
   const setUsbNetworkEnabled = async (enabled: boolean) => {
-    if (enabled === !!config.usbNetworkEnabled) {
-      return;
-    }
-    setConfig((current) => (current ? { ...current, usbNetworkEnabled: enabled } : current));
+    if (usbSettingsBusy.current) return;
+    usbSettingsBusy.current = true;
+    setUsbSettingsSaving(true);
     try {
       const applied = await applyUsbNetworkEnabled(enabled);
       setConfig((current) => (current ? { ...current, usbNetworkEnabled: applied } : current));
     } catch (error) {
-      setConfig((current) => (current ? { ...current, usbNetworkEnabled: !enabled } : current));
+      await refreshUsbSettings();
+      toaster.toast({ title: t("settings.usbSettingsError"), body: String(error) });
+    } finally {
+      usbSettingsBusy.current = false;
+      setUsbSettingsSaving(false);
     }
   };
   const setControllerType = async (value: string) => {
@@ -235,15 +256,16 @@ export function Settings({ config, setConfig }: {
           options={(config.sleepModes || []).map((option) => ({ ...option, label: translateLabel(option.label) }))}
           onChange={setSleepMode}
         />
-        <ToggleRow label={t("settings.enableSsh")} value={!!config.sshEnabled} onChange={setSshEnabled} />
         {config.usbNetworkSupported && (
           <ToggleRow
             label={t("settings.usbNetwork")}
             description={t("settings.usbNetworkDescription")}
             value={!!config.usbNetworkEnabled}
+            disabled={usbSettingsSaving}
             onChange={setUsbNetworkEnabled}
           />
         )}
+        <ToggleRow label={t("settings.enableSsh")} value={!!config.sshEnabled} onChange={setSshEnabled} />
         <Field label={t("settings.osVersion")} description={config.osVersion || t("common.unknown")} />
       </PanelSection>
       <PanelSection title={t("settings.experimental")}>
@@ -290,6 +312,7 @@ export function Settings({ config, setConfig }: {
           label={t("settings.usbFileTransfer")}
           description={config.mtpEnabled ? t("settings.enabledUntilShutdown") : undefined}
           value={!!config.mtpEnabled}
+          disabled={usbSettingsSaving}
           onChange={setMtpEnabled}
         />
       </PanelSection>
