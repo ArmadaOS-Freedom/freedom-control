@@ -119,7 +119,9 @@ def usb_network_state():
     # Images without the USB network link answer with an unknown action: hide the switch.
     try:
         state = call("get_usb_network_enabled")
-    except Exception:
+    except RuntimeError as exc:
+        if str(exc) != "unknown action":
+            raise
         return {"enabled": False, "supported": False}
     return {"enabled": bool(state.get("enabled")), "supported": bool(state.get("supported"))}
 

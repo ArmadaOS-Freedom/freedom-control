@@ -18,6 +18,20 @@ class UsbNetworkTest(unittest.TestCase):
         with mock.patch.object(system, "call", side_effect=RuntimeError("unknown action")):
             self.assertEqual(system.usb_network_state(), {"enabled": False, "supported": False})
 
+    def test_only_the_unknown_action_runtime_error_is_swallowed(self):
+        errors = [
+            TimeoutError("helper timed out"),
+            OSError("transport failure"),
+            ValueError("could not parse helper response"),
+            RuntimeError("helper crashed"),
+        ]
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(system, "call", side_effect=error):
+                    with self.assertRaises(type(error)) as caught:
+                        system.usb_network_state()
+                self.assertIs(caught.exception, error)
+
     def test_set_passes_a_bool_and_returns_the_applied_state(self):
         with mock.patch.object(system, "call", return_value={"enabled": False, "supported": True}) as call:
             self.assertIs(system.set_usb_network_enabled(0), False)
