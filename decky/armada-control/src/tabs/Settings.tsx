@@ -1,5 +1,5 @@
 import { toaster } from "@decky/api";
-import { ButtonItem, Field, PanelSection } from "@decky/ui";
+import { Field, PanelSection } from "@decky/ui";
 import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
@@ -9,7 +9,6 @@ import {
   setBottomScreenBrightness as applyBottomScreenBrightness,
   setBottomScreenEnabled as applyBottomScreenEnabled,
   setChargingFanPwm as applyChargingFanPwm,
-  setControllerType as applyControllerType,
   setMtpEnabled as applyMtpEnabled,
   setDesktopMode as applyDesktopMode,
   setSleepMode as applySleepMode,
@@ -19,7 +18,6 @@ import {
   setSwipeGesturesInGameEnabled as applySwipeGesturesInGameEnabled,
   setUsbNetworkEnabled as applyUsbNetworkEnabled,
 } from "../backend";
-import { openCalibration } from "../components/Calibration";
 import { HomePowerSetting } from "../components/HomePowerSetting";
 import { SelectEdit, SliderEdit, ToggleRow } from "../components/widgets";
 import { useDebouncedApply } from "../hooks/useDebouncedApply";
@@ -142,16 +140,6 @@ export function Settings({ config, setConfig }: {
       setUsbSettingsSaving(false);
     }
   };
-  const setControllerType = async (value: string) => {
-    const previous = config.controllerType || "deck-uhid";
-    setConfig((current) => (current ? { ...current, controllerType: value } : current));
-    try {
-      const applied = await applyControllerType(value);
-      setConfig((current) => (current ? { ...current, controllerType: applied } : current));
-    } catch (error) {
-      setConfig((current) => (current ? { ...current, controllerType: previous } : current));
-    }
-  };
   const setSwipeGesturesEnabled = async (enabled: boolean) => {
     if (swipeGesturesSaving || swipeGesturesInGameSaving) return;
     setSwipeGesturesSaving(true);
@@ -226,15 +214,6 @@ export function Settings({ config, setConfig }: {
   };
   return (
     <>
-      <PanelSection title={t("settings.controller")}>
-        <SelectEdit
-          label={t("settings.emulation")}
-          value={config.controllerType || "deck-uhid"}
-          options={(config.controllerTypes || []).map((option) => ({ ...option, label: translateLabel(option.label) }))}
-          onChange={setControllerType}
-        />
-        <ButtonItem layout="below" onClick={openCalibration}>{t("calibration.launch")}</ButtonItem>
-      </PanelSection>
       <PanelSection title={t("settings.system")}>
         <HomePowerSetting />
         <ToggleRow
