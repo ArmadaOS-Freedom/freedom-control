@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "项目说明 / Documentation"
+    url: https://github.com/ArmadaOS-Freedom/freedom-control/blob/main/README.zh-CN.md
+    about: "插件功能与支持的设备。Plugin features and supported devices."
+  - name: "系统问题 / System issues"
+    url: https://github.com/ArmadaOS-Freedom/armadaos-freedom/issues/new/choose
+    about: "与插件无关的系统问题请到系统仓库提。Report system problems unrelated to the plugin in the system repository."
