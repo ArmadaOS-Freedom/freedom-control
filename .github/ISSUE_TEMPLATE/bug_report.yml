@@ -1,0 +1,36 @@
+name: "问题反馈 / Bug report"
+description: "报告 Freedom Control 的问题。Report a problem with Freedom Control."
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: input
+    id: hardware
+    attributes:
+      label: 设备 / Hardware Device
+      description: 填写使用的设备型号。Enter your device model.
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: 系统版本 / OS version
+      description: ArmadaOS Freedom 的版本号或镜像文件名。ArmadaOS Freedom version or image filename.
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述 / Problem
+      description: 哪个设置或页面出错、复现步骤，可附截图或日志。Which setting or page misbehaves and how to reproduce; attach screenshots or logs if available.
+    validations:
+      required: true
+
+  - type: input
+    id: ai-disclosure
+    attributes:
+      label: AI 使用情况 / AI usage
+      description: 工具＋模型名称；未使用填“未使用”。Tool + model name, or None.
+    validations:
+      required: true
