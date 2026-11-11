@@ -157,6 +157,74 @@ class EnterDownloadModeFailureTest(unittest.TestCase):
         self.assertEqual(name, f"{module.BUS_NAME}.Error.DownloadModeFailed")
         self.assertIn("pipe failed", message)
 
+    def test_limit_rejection_happens_before_pipe_allocation(self):
+        """At the cap the daemon rejects without allocating a pipe or a lease."""
+        module = self.module
+        power = self.new_power()
+        power.download_handles = {"steam-app": module.MAX_DOWNLOAD_HANDLES}
+        invocation = mock.Mock()
+        with mock.patch.object(module.os, "pipe") as pipe_mock:
+            power.enter_download_mode("steam-app-two", invocation)
+        pipe_mock.assert_not_called()
+        self.assertEqual(power.download_handles,
+                         {"steam-app": module.MAX_DOWNLOAD_HANDLES})
+        invocation.return_value_with_unix_fd_list.assert_not_called()
+        invocation.return_dbus_error.assert_called_once()
+        name, message = invocation.return_dbus_error.call_args.args
+        self.assertEqual(name, f"{module.BUS_NAME}.Error.DownloadModeLimitReached")
+        self.assertIn(str(module.MAX_DOWNLOAD_HANDLES), message)
+
+    def test_limit_sums_handles_across_identifiers(self):
+        """The cap counts every identifier together, not each one separately."""
+        module = self.module
+        cap = module.MAX_DOWNLOAD_HANDLES
+        power = self.new_power()
+        power.download_handles = {
+            "steam-app-one": cap // 2,
+            "steam-app-two": cap - cap // 2,
+        }
+        invocation = mock.Mock()
+        with mock.patch.object(module.os, "pipe") as pipe_mock:
+            power.enter_download_mode("steam-app-three", invocation)
+        pipe_mock.assert_not_called()
+        invocation.return_dbus_error.assert_called_once()
+        name, _message = invocation.return_dbus_error.call_args.args
+        self.assertEqual(name, f"{module.BUS_NAME}.Error.DownloadModeLimitReached")
+        self.assertEqual(power.download_handles,
+                         {"steam-app-one": cap // 2,
+                          "steam-app-two": cap - cap // 2})
+
+    def test_one_below_limit_still_allocates_a_handle(self):
+        """A table one below the cap still accepts and registers a new lease."""
+        module = self.module
+        rfd, wfd = os.pipe()
+        fds = mock.Mock()
+        fake_gio = mock.Mock()
+        fake_gio.UnixFDList.new.return_value = fds
+        # Real GI flag enum so the daemon can OR HUP and ERR together; every
+        # other GLib attribute, including the watch, stays mocked.
+        fake_glib = mock.Mock()
+        fake_glib.IOCondition = GLib.IOCondition
+        invocation = mock.Mock()
+        power = self.new_power()
+        power.download_handles = {"steam-app": module.MAX_DOWNLOAD_HANDLES - 1}
+        try:
+            with mock.patch.object(module, "Gio", fake_gio, create=True):
+                with mock.patch.object(module, "GLib", fake_glib, create=True):
+                    with mock.patch.object(module.os, "pipe",
+                                           return_value=(rfd, wfd)):
+                        power.enter_download_mode("steam-app-two", invocation)
+            invocation.return_dbus_error.assert_not_called()
+            invocation.return_value_with_unix_fd_list.assert_called_once()
+            fake_glib.unix_fd_add_full.assert_called_once()
+            self.assertEqual(power.download_handles,
+                             {"steam-app": module.MAX_DOWNLOAD_HANDLES - 1,
+                              "steam-app-two": 1})
+            self.assert_closed(wfd)
+        finally:
+            close_quietly(rfd)
+            close_quietly(wfd)
+
 
 class DownloadModeServer:
     """Publish only the daemon's LowPowerMode1 object on the session bus."""
@@ -240,6 +308,10 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
             raise unittest.SkipTest("no private session bus; run under dbus-run-session")
         if not POWERD_PATH.is_file():
             raise unittest.SkipTest(f"powerd not found: {POWERD_PATH}")
+        if "armada_perf" not in sys.modules:
+            load_module("armada_perf", find_armada_perf(POWERD_PATH))
+        # Read the cap from the daemon under test so both checkouts agree.
+        cls.module = load_module("armada_powerd_cap_test", POWERD_PATH)
         cls.daemon_log = []
         cls.server_proc = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()),
@@ -362,6 +434,28 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
         self.open_fds.add(fd)
         return fd
 
+    def lease_error_name(self, identifier):
+        """Attempt a lease and return the remote error name that rejected it."""
+        try:
+            self.connection.call_with_unix_fd_list_sync(
+                BUS_NAME,
+                OBJECT_PATH,
+                IFACE_LOW_POWER,
+                "EnterDownloadMode",
+                GLib.Variant("(s)", (identifier,)),
+                GLib.VariantType("(h)"),
+                Gio.DBusCallFlags.NONE,
+                CALL_TIMEOUT_MS,
+                None,
+                None,
+            )
+        except GLib.Error as exc:
+            try:
+                return Gio.DBusError.get_remote_error(exc) or exc.message
+            except Exception:
+                return exc.message
+        self.fail(f"EnterDownloadMode for {identifier!r} unexpectedly succeeded")
+
     def close_lease(self, fd):
         if fd in self.open_fds:
             os.close(fd)
@@ -442,6 +536,41 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
                       f"client never held a lease: {result.stdout}{result.stderr}")
         handles = self.wait_count("steam-app", 0)
         self.assertEqual(handles, {})
+
+    def fill_to_cap(self):
+        """Lease one distinct identifier at a time until the daemon hits the cap."""
+        cap = self.module.MAX_DOWNLOAD_HANDLES
+        leases = [self.lease(f"steam-app-{index}") for index in range(cap)]
+        self._wait_handles(
+            lambda current: sum(current.values()) == cap,
+            f"expected {cap} leases before the cap test")
+        return leases
+
+    def test_cap_rejects_new_identifier_and_keeps_existing_leases(self):
+        """A full handle table rejects a new identifier while earlier leases stay live."""
+        leases = self.fill_to_cap()
+        before = self.handles_raw()
+        message = self.lease_error_name("steam-app-overflow")
+        self.assertIn(f"{BUS_NAME}.Error.DownloadModeLimitReached", message)
+        self.assertEqual(self.handles_raw(), before,
+                         "a rejected lease must not change the handle table")
+        self.assert_stays("steam-app-overflow", 0)
+        # The handle accepted at the cap is still a working write end.
+        self.assertEqual(os.write(leases[-1], b"x"), 1)
+        self.close_lease(leases[-1])
+        self.wait_count(f"steam-app-{len(leases) - 1}", 0)
+        self.lease("steam-app-overflow")
+        self.wait_count("steam-app-overflow", 1)
+
+    def test_cap_rejects_repeated_identifier(self):
+        """Repeated leases of one identifier count against the same global cap."""
+        cap = self.module.MAX_DOWNLOAD_HANDLES
+        for _ in range(cap):
+            self.lease("steam-app")
+        self.wait_count("steam-app", cap)
+        message = self.lease_error_name("steam-app")
+        self.assertIn(f"{BUS_NAME}.Error.DownloadModeLimitReached", message)
+        self.assertEqual(self.handles_raw(), {"steam-app": cap})
 
 
 def run_client(identifier):

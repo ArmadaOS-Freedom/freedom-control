@@ -1,7 +1,10 @@
 const ENABLED_KEY = "system_enable_low_power_downloads";
 const BATTERY_KEY = "system_allow_battery_low_power_downloads";
-// Steam reports the AC state as 1 while the charger is unplugged.
+// SteamTracking EACState enum: Unknown = 0, Disconnected = 1, Connected = 2,
+// ConnectedSlow = 3. Only the three defined power-source values are trusted.
 const AC_DISCONNECTED = 1;
+const AC_CONNECTED = 2;
+const AC_CONNECTED_SLOW = 3;
 const MIN_BATTERY_LEVEL = 0.2;
 
 export interface LowPowerDownloadSettings {
@@ -65,16 +68,24 @@ function currentDownloadEntry(): DownloadEntry | undefined {
 
 // Returns undefined while Steam has no usable power data: a missing store, a
 // missing batteryState or an unset battery identity is unknown power data, not
-// a confirmed device without a battery. A confirmed battery also needs a finite
-// numeric AC state before its power source is trusted.
+// a confirmed device without a battery. A confirmed battery also needs a
+// recognised SteamTracking EACState before its power source is trusted, so the
+// Unknown value (0) and out-of-enum values (strings, negative, NaN, ...) are
+// reported as unknown rather than being read as on AC or on battery. A
+// confirmed device without a battery keeps working without any AC data.
 function systemPowerState(): PowerState | undefined {
   const battery = (window as any).SystemPowerStore?.batteryState;
   if (!battery || typeof battery.bHasBattery !== "boolean") return undefined;
-  if (battery.bHasBattery && !Number.isFinite(battery.eACState)) return undefined;
+  const batteryLevel = Number(battery.flLevel ?? 0);
+  if (!battery.bHasBattery) return { hasBattery: false, acConnected: false, batteryLevel };
+  const acState = battery.eACState;
+  if (acState !== AC_DISCONNECTED && acState !== AC_CONNECTED && acState !== AC_CONNECTED_SLOW) {
+    return undefined;
+  }
   return {
-    hasBattery: battery.bHasBattery,
-    acConnected: battery.eACState !== AC_DISCONNECTED,
-    batteryLevel: Number(battery.flLevel ?? 0),
+    hasBattery: true,
+    acConnected: acState === AC_CONNECTED || acState === AC_CONNECTED_SLOW,
+    batteryLevel,
   };
 }
 
