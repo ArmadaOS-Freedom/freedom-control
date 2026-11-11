@@ -63,19 +63,27 @@ function currentDownloadEntry(): DownloadEntry | undefined {
   return Array.from(overview.values() as Iterable<DownloadEntry>)[0];
 }
 
-function systemPowerState(): PowerState {
+// Returns undefined while Steam has no usable power data: a missing store, a
+// missing batteryState or an unset battery identity is unknown power data, not
+// a confirmed device without a battery. A confirmed battery also needs a finite
+// numeric AC state before its power source is trusted.
+function systemPowerState(): PowerState | undefined {
   const battery = (window as any).SystemPowerStore?.batteryState;
+  if (!battery || typeof battery.bHasBattery !== "boolean") return undefined;
+  if (battery.bHasBattery && !Number.isFinite(battery.eACState)) return undefined;
   return {
-    hasBattery: !!battery?.bHasBattery,
-    acConnected: !!battery && battery.eACState !== AC_DISCONNECTED,
-    batteryLevel: Number(battery?.flLevel ?? 0),
+    hasBattery: battery.bHasBattery,
+    acConnected: battery.eACState !== AC_DISCONNECTED,
+    batteryLevel: Number(battery.flLevel ?? 0),
   };
 }
 
 function shouldOffer(): boolean {
+  const power = systemPowerState();
+  if (!power) return false;
   return shouldOfferLowPowerDownload(
     getLowPowerDownloadSettings(),
-    systemPowerState(),
+    power,
     isDownloadActive(currentDownloadEntry()),
   );
 }

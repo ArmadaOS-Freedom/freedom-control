@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 try:
@@ -90,6 +91,71 @@ def close_quietly(fd):
         os.close(fd)
     except OSError:
         pass
+
+
+class EnterDownloadModeFailureTest(unittest.TestCase):
+    """Failure-path tests that call the daemon method without a bus."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not POWERD_PATH.is_file():
+            raise unittest.SkipTest(f"powerd not found: {POWERD_PATH}")
+        if "armada_perf" not in sys.modules:
+            load_module("armada_perf", find_armada_perf(POWERD_PATH))
+        cls.module = load_module("armada_powerd_failure_test", POWERD_PATH)
+
+    def new_power(self):
+        power = self.module.ArmadaPower.__new__(self.module.ArmadaPower)
+        power.download_handles = {}
+        return power
+
+    def assert_closed(self, fd):
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+
+    def test_append_failure_replies_once_and_closes_both_descriptors(self):
+        module = self.module
+        rfd, wfd = os.pipe()
+        failing_list = mock.Mock()
+        failing_list.append.side_effect = OSError("append failed")
+        fake_gio = mock.Mock()
+        fake_gio.UnixFDList.new.return_value = failing_list
+        fake_glib = mock.Mock()
+        invocation = mock.Mock()
+        power = self.new_power()
+        try:
+            with mock.patch.object(module, "Gio", fake_gio, create=True):
+                with mock.patch.object(module, "GLib", fake_glib, create=True):
+                    with mock.patch.object(module.os, "pipe", return_value=(rfd, wfd)):
+                        power.enter_download_mode("steam-app", invocation)
+            self.assertEqual(power.download_handles, {})
+            fake_glib.unix_fd_add_full.assert_not_called()
+            invocation.return_value_with_unix_fd_list.assert_not_called()
+            invocation.return_dbus_error.assert_called_once()
+            name, message = invocation.return_dbus_error.call_args.args
+            self.assertEqual(name, f"{module.BUS_NAME}.Error.DownloadModeFailed")
+            self.assertIn("append failed", message)
+            self.assert_closed(rfd)
+            self.assert_closed(wfd)
+        finally:
+            close_quietly(rfd)
+            close_quietly(wfd)
+
+    def test_pipe_failure_replies_once_without_registration(self):
+        module = self.module
+        fake_glib = mock.Mock()
+        invocation = mock.Mock()
+        power = self.new_power()
+        with mock.patch.object(module, "GLib", fake_glib, create=True):
+            with mock.patch.object(module.os, "pipe", side_effect=OSError("pipe failed")):
+                power.enter_download_mode("steam-app", invocation)
+        self.assertEqual(power.download_handles, {})
+        fake_glib.unix_fd_add_full.assert_not_called()
+        invocation.return_value_with_unix_fd_list.assert_not_called()
+        invocation.return_dbus_error.assert_called_once()
+        name, message = invocation.return_dbus_error.call_args.args
+        self.assertEqual(name, f"{module.BUS_NAME}.Error.DownloadModeFailed")
+        self.assertIn("pipe failed", message)
 
 
 class DownloadModeServer:

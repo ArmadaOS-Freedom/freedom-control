@@ -18,6 +18,127 @@ const power = (overrides: Partial<PowerState> = {}): PowerState => ({
   ...overrides,
 });
 
+function installSleepPatch(windowOverrides: Record<string, unknown> = {}) {
+  const calls: unknown[][] = [];
+  const original = function (this: unknown, ...args: unknown[]) {
+    calls.push(args);
+    return "slept";
+  };
+  const store: any = { InitiateSleep: original, ShowConfirmSleepModal: false };
+  store.SetShowConfirmSleepModal = (open: boolean) => {
+    store.ShowConfirmSleepModal = open;
+  };
+  const fakeWindow: any = {
+    settingsStore: { GetClientSetting: () => [true, () => {}] },
+    downloadsStore: { m_DownloadOverview: new Map([[1, { update_state: "Downloading", paused: false }]]) },
+    SuspendResumeStore: store,
+    ...windowOverrides,
+  };
+  (globalThis as any).window = fakeWindow;
+  const unregister = registerLowPowerDownloadEntry();
+  return { calls, store, fakeWindow, unregister };
+}
+
+test("passes sleep through when SystemPowerStore is missing", () => {
+  const { calls, store, unregister } = installSleepPatch();
+  store.InitiateSleep.call(store, "sleep");
+  assert.equal(store.ShowConfirmSleepModal, false);
+  assert.deepEqual(calls, [["sleep"]]);
+  unregister();
+});
+
+test("passes sleep through when batteryState is missing", () => {
+  const { calls, store, unregister } = installSleepPatch({ SystemPowerStore: {} });
+  store.InitiateSleep.call(store, "sleep");
+  assert.equal(store.ShowConfirmSleepModal, false);
+  assert.deepEqual(calls, [["sleep"]]);
+  unregister();
+});
+
+test("passes sleep through while the battery identity is uninitialized", () => {
+  const { calls, store, fakeWindow, unregister } = installSleepPatch({
+    SystemPowerStore: { batteryState: { eACState: 0, flLevel: 1 } },
+  });
+  store.InitiateSleep.call(store, "first");
+  fakeWindow.SystemPowerStore.batteryState = { bHasBattery: undefined, eACState: 0, flLevel: 1 };
+  store.InitiateSleep.call(store, "second");
+  assert.equal(store.ShowConfirmSleepModal, false);
+  assert.deepEqual(calls, [["first"], ["second"]]);
+  unregister();
+});
+
+test("passes sleep through when a present battery has no usable AC state", () => {
+  const batteryStates = [
+    { bHasBattery: true, flLevel: 1 },
+    { bHasBattery: true, eACState: null, flLevel: 1 },
+    { bHasBattery: true, eACState: undefined, flLevel: 1 },
+  ];
+  for (const batteryState of batteryStates) {
+    const { calls, store, unregister } = installSleepPatch({
+      SystemPowerStore: { batteryState },
+    });
+    store.InitiateSleep.call(store, "sleep");
+    assert.equal(store.ShowConfirmSleepModal, false);
+    assert.deepEqual(calls, [["sleep"]]);
+    unregister();
+  }
+});
+
+test("gating resumes once valid power data arrives", () => {
+  const { calls, store, fakeWindow, unregister } = installSleepPatch();
+  store.InitiateSleep.call(store, "before");
+  assert.equal(store.ShowConfirmSleepModal, false);
+  assert.deepEqual(calls, [["before"]]);
+  fakeWindow.SystemPowerStore = { batteryState: { bHasBattery: true, eACState: 0, flLevel: 0.1 } };
+  store.InitiateSleep.call(store, "after");
+  assert.equal(store.ShowConfirmSleepModal, true);
+  assert.deepEqual(calls, [["before"]]);
+  store.InitiateSleep.call(store, "confirm");
+  assert.deepEqual(calls, [["before"], ["confirm"]]);
+  unregister();
+});
+
+test("keeps sleep unchanged when valid low battery data arrives with battery mode disabled", () => {
+  const settingsStore = {
+    GetClientSetting: (key: string) => [
+      key !== "system_allow_battery_low_power_downloads",
+      () => {},
+    ],
+  };
+  const { calls, store, fakeWindow, unregister } = installSleepPatch({
+    settingsStore,
+    SystemPowerStore: { batteryState: { bHasBattery: true, flLevel: 0.1 } },
+  });
+  store.InitiateSleep.call(store, "unknown");
+  assert.equal(store.ShowConfirmSleepModal, false);
+  assert.deepEqual(calls, [["unknown"]]);
+  fakeWindow.SystemPowerStore = { batteryState: { bHasBattery: true, eACState: 1, flLevel: 0.1 } };
+  store.InitiateSleep.call(store, "low");
+  assert.equal(store.ShowConfirmSleepModal, false);
+  assert.deepEqual(calls, [["unknown"], ["low"]]);
+  unregister();
+});
+
+test("still offers on a confirmed device without a battery", () => {
+  const { calls, store, unregister } = installSleepPatch({
+    SystemPowerStore: { batteryState: { bHasBattery: false, eACState: 1, flLevel: 0 } },
+  });
+  store.InitiateSleep.call(store, "sleep");
+  assert.equal(store.ShowConfirmSleepModal, true);
+  assert.deepEqual(calls, []);
+  unregister();
+});
+
+test("still offers on a confirmed device without a battery and no AC data", () => {
+  const { calls, store, unregister } = installSleepPatch({
+    SystemPowerStore: { batteryState: { bHasBattery: false } },
+  });
+  store.InitiateSleep.call(store, "sleep");
+  assert.equal(store.ShowConfirmSleepModal, true);
+  assert.deepEqual(calls, []);
+  unregister();
+});
+
 test("offers to keep downloading with the screen off on AC power", () => {
   assert.equal(shouldOfferLowPowerDownload(settings(true, false), power(), true), true);
 });
