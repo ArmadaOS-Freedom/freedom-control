@@ -267,6 +267,52 @@ class DaemonConfigTest(unittest.TestCase):
         self.assertEqual(
             power.cpu_max_target(settings, 6, OPP[6]), 2246400)
 
+    def test_underclock_matches_policies_by_cluster_cpus(self):
+        """A policy named after a later CPU still gets its cluster's cap.
+
+        The six-core SM8650 (CPUs 1-2 absent) exposes policy0/3/5/7, the
+        eight-core one policy0/2/5/7; the factory table uses policy2 for the
+        middle cluster, so both layouts must cap it.
+        """
+        freqs = {
+            0: [1459200, 1689600, 1939200, 2265600],
+            2: [2035200, 2323200, 2764800, 2956800],
+            5: [2035200, 2323200, 2764800, 2956800],
+            7: [2112000, 2438400, 2937600, 3052800],
+        }
+        layouts = {
+            "six-core": {0: [0, 1], 3: [2, 3, 4], 5: [5, 6], 7: [7]},
+            "eight-core": {0: [0, 1], 2: [2, 3, 4], 5: [5, 6], 7: [7]},
+        }
+        for name, layout in layouts.items():
+            with self.subTest(layout=name):
+                power = self.daemon(soc="SM8650", factory=PUBLIC_PROFILES)
+                (_default, underclocks, _curves, profiles,
+                 _fan, _suspend, _system) = power.parse_config()
+                power.underclock_config = underclocks
+                power.profile_config = profiles
+                power.profile = "balanced"
+                power.apply_underclock_refs()
+                self.assertEqual(profiles["balanced"]["cpu_underclock"], "medium")
+                root = self.tmp / name
+                power.cpu_policies = []
+                for policy_id, cpus in layout.items():
+                    policy = root / f"policy{policy_id}"
+                    policy.mkdir(parents=True)
+                    (policy / "related_cpus").write_text(
+                        " ".join(map(str, cpus)) + "\n", encoding="utf-8")
+                    (policy / "scaling_available_frequencies").write_text(
+                        " ".join(map(str, freqs[cpus[0]])) + "\n",
+                        encoding="utf-8")
+                    power.cpu_policies.append(policy)
+                middle = "policy3" if name == "six-core" else "policy2"
+                self.assertEqual(power.resolved_cpu_caps(), {
+                    "policy0": 1689600,
+                    middle: 2323200,
+                    "policy5": 2323200,
+                    "policy7": 2438400,
+                })
+
     def test_factory_tiers_use_real_opp_and_are_monotonic(self):
         self.assertTrue(SM8850_PROFILES.is_file(),
                         f"missing chip factory file: {SM8850_PROFILES}")
