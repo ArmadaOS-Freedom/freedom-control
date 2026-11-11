@@ -278,6 +278,7 @@ class ArmadaPower:
         self.scx_spec = None
         self.scx_failed = None
         self.scx_warned = set()
+        self.cap_miss_warned = set()
         self.load_config()
         self.profile = self.default_profile
         self.discover()
@@ -663,7 +664,7 @@ class ArmadaPower:
     def policy_cpus(self, policy):
         return ints_from_file(policy / "related_cpus")
 
-    def policy_cap(self, caps, policy_id, cpus, default):
+    def policy_cap(self, caps, policy_id, cpus):
         # Tables are keyed by the cluster's first CPU. A policy is named after
         # the first CPU that came online, so on a part with fused-off cores
         # (six-core SM8650: CPUs 1-2 absent, middle cluster is policy3) the
@@ -673,10 +674,23 @@ class ArmadaPower:
         for cpu in cpus:
             if cpu in caps:
                 return caps[cpu]
-        return default
+        return None
 
     def cpu_max_target(self, settings, policy_id, freqs, cpus=()):
-        tier = self.policy_cap(settings["cpu_max_policy"], policy_id, cpus, freqs[-1])
+        caps = settings["cpu_max_policy"]
+        tier = self.policy_cap(caps, policy_id, cpus)
+        if tier is None:
+            tier = freqs[-1]
+            # An empty table means the profile is deliberately uncapped; a
+            # table without this cluster leaves it at full speed, so say so
+            # once per policy instead of on every profile apply.
+            if caps and policy_id not in self.cap_miss_warned and (
+                    self.cpu_device_class() == "SM8850"
+                    or self.cpu_device_class() in self.underclock_config):
+                self.cap_miss_warned.add(policy_id)
+                print(f"armada-powerd: no cpu_max_policy entry for policy{policy_id} "
+                      f"(cpus {' '.join(map(str, cpus)) or '?'}); leaving it uncapped",
+                      file=sys.stderr)
         if self.cpu_device_class() == "SM8850":
             # SM8850's floor table must not bypass a saved cpu_max ratio, even
             # when the profile selects no underclock level.

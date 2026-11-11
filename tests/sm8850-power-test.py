@@ -18,8 +18,10 @@ Run with the standard library only::
 """
 
 import configparser
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import shutil
 import sys
@@ -173,6 +175,7 @@ class DaemonConfigTest(unittest.TestCase):
         POWERD.CONFIG_FILE = self.etc
         power = POWERD.ArmadaPower.__new__(POWERD.ArmadaPower)
         power.env = {"ARMADA_SOC_CLASS": soc} if soc else {}
+        power.cap_miss_warned = set()
         return power
 
     def test_chip_layer_only_overrides_its_own_fields(self):
@@ -312,6 +315,28 @@ class DaemonConfigTest(unittest.TestCase):
                     "policy5": 2323200,
                     "policy7": 2438400,
                 })
+                power.gpu = None
+                power.apply_profile()
+                self.assertEqual(
+                    (root / middle / "scaling_max_freq").read_text(
+                        encoding="utf-8").strip(), "2323200")
+
+    def test_policy_missing_from_selected_table_warns_once(self):
+        power = POWERD.ArmadaPower.__new__(POWERD.ArmadaPower)
+        power.env = {"ARMADA_SOC_CLASS": "SM8650"}
+        power.underclock_config = {"SM8650": {"medium": {0: 1689600}}}
+        power.cap_miss_warned = set()
+        capped = {"cpu_max": 1.0, "cpu_max_policy": {0: 1689600}}
+        uncapped = {"cpu_max": 1.0, "cpu_max_policy": {}}
+        freqs = [2035200, 2956800]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(3):
+                self.assertEqual(
+                    power.cpu_max_target(capped, 3, freqs, [2, 3, 4]), 2956800)
+            power.cpu_max_target(uncapped, 5, freqs, [5, 6])
+        self.assertEqual(err.getvalue().count("no cpu_max_policy entry"), 1)
+        self.assertIn("policy3", err.getvalue())
 
     def test_factory_tiers_use_real_opp_and_are_monotonic(self):
         self.assertTrue(SM8850_PROFILES.is_file(),
