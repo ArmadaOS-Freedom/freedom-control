@@ -10,6 +10,7 @@ import {
   registerDownloadWatcher,
   sweepInstalledGames,
 } from "./lib/steamCompat";
+import { registerLowPowerDownloadEntry } from "./lib/lowPowerDownloads";
 import { factoryDefaultTransition } from "./lib/protonPolicy";
 import { installY700FrameRateChoices } from "./lib/y700FrameRateChoices";
 import { registerSteamProfileLocalization } from "./lib/steamProfileLocalization";
@@ -44,6 +45,7 @@ export default definePlugin(() => {
   let unregisterDownloadWatcher = () => {};
   let disposeFrameRateChoices = () => {};
   const unregisterProfileLocalization = registerSteamProfileLocalization();
+  const unregisterLowPowerDownloads = registerLowPowerDownloadEntry();
   const stopWatchingSideMenus = watchSideMenus();
   const persistHandledGames = () => {
     saveCompatApplied(handledGameAppids()).catch(() => {});
@@ -120,6 +122,7 @@ export default definePlugin(() => {
       unregisterDownloadWatcher();
       disposeFrameRateChoices();
       unregisterProfileLocalization();
+      unregisterLowPowerDownloads();
       stopWatchingSideMenus();
     },
     icon: (
