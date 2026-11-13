@@ -12,6 +12,10 @@ The helper daemon never builds the real ArmadaPower(): it allocates an instance
 with __new__, gives it an empty download_handles table and publishes only the
 LowPowerMode1 interface taken from the daemon's own XML. No profile, fan, CPU
 or GPU state is read or written, so the suite cannot touch hardware.
+
+The helper writes one READY line from the name-acquired callback of
+Gio.bus_own_name, so that line means the well-known name is owned and calls can
+be dispatched; the suite starts issuing calls only after it reads that line.
 """
 
 import importlib.machinery
@@ -267,12 +271,17 @@ class DownloadModeServer:
         self.power = power
 
     def run(self):
-        """Publish the interface on the session bus until signalled, then exit 0."""
+        """Publish the interface until signalled, then exit 0.
+
+        READY is printed by the name-acquired callback, so a caller that waits
+        for it knows the well-known name is owned, not merely that the bus
+        connection exists.
+        """
         self.load()
         self.loop = GLib.MainLoop()
 
         def bus_acquired(connection, _name):
-            """Register the LowPowerMode1 object and announce READY on stdout."""
+            """Register the LowPowerMode1 object once the bus is reachable."""
             connection.register_object(
                 self.module.OBJECT_PATH,
                 self.interface,
@@ -280,6 +289,9 @@ class DownloadModeServer:
                 None,
                 None,
             )
+
+        def name_acquired(_connection, _name):
+            """Announce READY only once the bus owns the well-known name."""
             sys.stdout.write("READY\n")
             sys.stdout.flush()
 
@@ -292,7 +304,7 @@ class DownloadModeServer:
             self.module.BUS_NAME,
             Gio.BusNameOwnerFlags.NONE,
             bus_acquired,
-            None,
+            name_acquired,
             name_lost,
         )
 
@@ -382,7 +394,7 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
 
     @classmethod
     def _wait_ready(cls):
-        """Wait until the daemon prints READY, failing on exit or timeout."""
+        """Wait until the daemon owns the bus name and prints READY."""
         stream = cls.server_proc.stdout
         deadline = time.monotonic() + READY_TIMEOUT_S
         while True:
