@@ -662,9 +662,20 @@ class ArmadaPower:
             return -1
 
     def policy_cpus(self, policy):
+        """Member CPU ids of one cpufreq policy, ascending.
+
+        Read from ``related_cpus``; a missing or unreadable file yields an
+        empty list.
+        """
         return ints_from_file(policy / "related_cpus")
 
     def policy_cap(self, caps, policy_id, cpus):
+        """Return the cap this policy inherits from ``caps``, else ``None``.
+
+        The exact policy id is the primary key; only when it is absent are the
+        cluster's member ``cpus`` tried, in ascending order, so a table keyed
+        by the cluster's first CPU still lands on the right policy.
+        """
         # Tables are keyed by the cluster's first CPU. A policy is named after
         # the first CPU that came online, so on a part with fused-off cores
         # (six-core SM8650: CPUs 1-2 absent, middle cluster is policy3) the
@@ -677,6 +688,22 @@ class ArmadaPower:
         return None
 
     def cpu_max_target(self, settings, policy_id, freqs, cpus=()):
+        """Resolve the scaling_max_freq ceiling for one policy, in kHz.
+
+        ``settings["cpu_max_policy"]`` is per policy: the exact policy id wins
+        and member ``cpus`` are consulted only when it is absent. No entry
+        therefore means the table caps nothing for this cluster and the tier
+        is the top OPP, still subject to the SoC rule below; an empty table
+        means the profile is deliberately uncapped. Neither is an error, and
+        an empty table never warns. For SM8850 and any SoC carrying an
+        underclock table the first such miss per policy prints one stderr
+        line, remembered in ``cap_miss_warned`` for the rest of the daemon's
+        lifetime so profile switches and reloads stay quiet.
+
+        SM8850 returns the lower of that tier and the ``cpu_max`` ratio; other
+        underclocked SoCs let the table tier win outright, and SoCs without an
+        underclock table use the ratio alone.
+        """
         caps = settings["cpu_max_policy"]
         tier = self.policy_cap(caps, policy_id, cpus)
         if tier is None:

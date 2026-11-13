@@ -169,6 +169,12 @@ class DaemonConfigTest(unittest.TestCase):
             CHIP_FIXTURE, encoding="utf-8")
 
     def daemon(self, soc="SM8850", etc_text=None, factory=None):
+        """Build an ArmadaPower without running ``__init__``.
+
+        Configuration paths are repointed at the temporary copies, ``env``
+        carries only the SoC class, and ``cap_miss_warned`` starts empty so
+        every test observes the daemon's first warning.
+        """
         if etc_text is not None:
             self.etc.write_text(etc_text, encoding="utf-8")
         POWERD.FACTORY_CONFIG_FILE = factory or self.factory
@@ -275,7 +281,8 @@ class DaemonConfigTest(unittest.TestCase):
 
         The six-core SM8650 (CPUs 1-2 absent) exposes policy0/3/5/7, the
         eight-core one policy0/2/5/7; the factory table uses policy2 for the
-        middle cluster, so both layouts must cap it.
+        middle cluster, so both layouts must cap it.  Lookup is per-policy
+        first: only a missing policy id falls back to the member CPUs.
         """
         freqs = {
             0: [1459200, 1689600, 1939200, 2265600],
@@ -322,6 +329,12 @@ class DaemonConfigTest(unittest.TestCase):
                         encoding="utf-8").strip(), "2323200")
 
     def test_policy_missing_from_selected_table_warns_once(self):
+        """A non-empty table without this policy leaves it uncapped, warns once.
+
+        The warning is keyed by policy id and remembered on the daemon, so
+        repeated applies stay quiet; an empty table means no cap by design and
+        never warns.
+        """
         power = POWERD.ArmadaPower.__new__(POWERD.ArmadaPower)
         power.env = {"ARMADA_SOC_CLASS": "SM8650"}
         power.underclock_config = {"SM8650": {"medium": {0: 1689600}}}
