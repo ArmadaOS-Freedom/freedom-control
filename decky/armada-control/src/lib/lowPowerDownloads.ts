@@ -23,33 +23,44 @@ export interface DownloadEntry {
   paused?: boolean;
 }
 
+/** Read a client setting and its optional setter from the Steam settings store. */
 function clientSetting(key: string): [any, ((value: any) => unknown) | undefined] {
   const setting = window.settingsStore?.GetClientSetting?.(key);
   return [setting?.[0], setting?.[1]];
 }
 
+/** Return the stored low-power download toggles; unset values read as false. */
 export function getLowPowerDownloadSettings(): LowPowerDownloadSettings {
   return { enabled: !!clientSetting(ENABLED_KEY)[0], onBattery: !!clientSetting(BATTERY_KEY)[0] };
 }
 
+/** Write a boolean client setting through its Steam-provided setter. */
 async function setClientSetting(key: string, value: boolean): Promise<void> {
   const setter = clientSetting(key)[1];
   if (!setter) throw new Error("Steam settings are unavailable");
   await Promise.resolve(setter(value));
 }
 
+/** Persist whether low-power downloads are offered at all. */
 export const setLowPowerDownloadsEnabled = (value: boolean): Promise<void> =>
   setClientSetting(ENABLED_KEY, value);
 
+/** Persist whether low-power downloads are offered on battery power. */
 export const setLowPowerDownloadsOnBattery = (value: boolean): Promise<void> =>
   setClientSetting(BATTERY_KEY, value);
 
+/** True when the entry is downloading and not paused. */
 export function isDownloadActive(entry: DownloadEntry | undefined): boolean {
   return !!entry && entry.update_state === "Downloading" && !entry.paused;
 }
 
 // Same conditions Steam uses on Deck: any power source when there is no
 // battery, wall power, or battery power with more than 20% left when allowed.
+/**
+ * Decide whether the confirm-sleep offer applies: the feature and download
+ * must be active, then no battery or AC power always offers, while battery
+ * power needs the on-battery toggle and more than 20% charge.
+ */
 export function shouldOfferLowPowerDownload(
   settings: LowPowerDownloadSettings,
   power: PowerState,
@@ -60,6 +71,7 @@ export function shouldOfferLowPowerDownload(
   return settings.onBattery && power.batteryLevel > MIN_BATTERY_LEVEL;
 }
 
+/** Return Steam's first download overview entry, if any. */
 function currentDownloadEntry(): DownloadEntry | undefined {
   const overview = (window as any).downloadsStore?.m_DownloadOverview;
   if (!overview || typeof overview.values !== "function") return undefined;
@@ -73,6 +85,7 @@ function currentDownloadEntry(): DownloadEntry | undefined {
 // Unknown value (0) and out-of-enum values (strings, negative, NaN, ...) are
 // reported as unknown rather than being read as on AC or on battery. A
 // confirmed device without a battery keeps working without any AC data.
+/** Return trusted power state, or undefined while Steam's power data is unknown. */
 function systemPowerState(): PowerState | undefined {
   const battery = (window as any).SystemPowerStore?.batteryState;
   if (!battery || typeof battery.bHasBattery !== "boolean") return undefined;
@@ -89,6 +102,7 @@ function systemPowerState(): PowerState | undefined {
   };
 }
 
+/** Combine live power, settings and download state into the offer decision. */
 function shouldOffer(): boolean {
   const power = systemPowerState();
   if (!power) return false;
@@ -102,14 +116,21 @@ function shouldOffer(): boolean {
 // Steam only offers its low-power download mode on Valve and Lenovo hardware,
 // so put its confirm-sleep modal in front of sleep ourselves. The modal's own
 // Sleep button calls InitiateSleep while it is open, so that call passes through.
+/**
+ * Patch SuspendResumeStore.InitiateSleep to show Steam's confirm-sleep modal
+ * when the offer applies. Returns an unregister function; installation retries
+ * once per second until the store exists and is removed on unregister.
+ */
 export function registerLowPowerDownloadEntry(): () => void {
   let restore = () => {};
   let stopped = false;
   let timer: number | undefined;
+  /** Install the sleep patch; returns false while the store is not ready. */
   const install = (): boolean => {
     const store = (window as any).SuspendResumeStore;
     if (stopped || !store?.InitiateSleep || !store.SetShowConfirmSleepModal) return false;
     const original = store.InitiateSleep;
+    /** Show the confirm-sleep modal instead of sleeping when the offer applies. */
     store.InitiateSleep = function (this: any, ...args: unknown[]) {
       if (!this.ShowConfirmSleepModal && shouldOffer()) {
         this.SetShowConfirmSleepModal(true);
@@ -117,6 +138,7 @@ export function registerLowPowerDownloadEntry(): () => void {
       }
       return original.apply(this, args);
     };
+    /** Restore the original InitiateSleep. */
     restore = () => {
       store.InitiateSleep = original;
     };

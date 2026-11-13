@@ -35,6 +35,7 @@ const BOTTOM_SCREEN_BRIGHTNESS_DELAY_MS: number = 150;
 // Each apply reloads armada-powerd.
 const CHARGING_FAN_DELAY_MS: number = 500;
 
+/** Settings tab: system, experimental and diagnostics panels. */
 export function Settings({ config, setConfig }: {
   config: Config;
   setConfig: Dispatch<SetStateAction<Config | null>>;
@@ -229,6 +230,7 @@ export function Settings({ config, setConfig }: {
       setSleepLogsSaving(false);
     }
   };
+  /** Save the master low-power download toggle, rolling back on failure. */
   const setLowPowerDownloadsEnabled = async (enabled: boolean) => {
     if (lowPowerDownloadsSaving) return;
     setLowPowerDownloads((current) => (current ? { ...current, enabled } : current));
@@ -242,6 +244,7 @@ export function Settings({ config, setConfig }: {
       setLowPowerDownloadsSaving(false);
     }
   };
+  /** Save the on-battery low-power download toggle, rolling back on failure. */
   const setLowPowerDownloadsOnBattery = async (onBattery: boolean) => {
     if (lowPowerDownloadsBatterySaving) return;
     setLowPowerDownloads((current) => (current ? { ...current, onBattery } : current));

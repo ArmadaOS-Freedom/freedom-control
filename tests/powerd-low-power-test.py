@@ -55,6 +55,7 @@ POWERD_PATH = DEFAULT_POWERD
 
 
 def load_module(name, path):
+    """Import *path* under *name* and return the loaded module."""
     loader = importlib.machinery.SourceFileLoader(name, str(path))
     spec = importlib.util.spec_from_loader(name, loader)
     if spec is None:
@@ -66,6 +67,7 @@ def load_module(name, path):
 
 
 def find_armada_perf(powerd_path):
+    """Return the armada_perf.py file shipped at or above *powerd_path*."""
     directory = Path(powerd_path).resolve().parent
     for _ in range(6):
         for candidate in (directory / "armada_perf.py",
@@ -79,6 +81,7 @@ def find_armada_perf(powerd_path):
 
 
 def drain(stream, sink):
+    """Append each line from *stream* to *sink* until EOF or the stream closes."""
     try:
         for line in iter(stream.readline, ""):
             sink.append(line.rstrip("\n"))
@@ -87,6 +90,7 @@ def drain(stream, sink):
 
 
 def close_quietly(fd):
+    """Close *fd*, ignoring an already-closed or invalid descriptor."""
     try:
         os.close(fd)
     except OSError:
@@ -98,6 +102,7 @@ class EnterDownloadModeFailureTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        """Load armada_perf and the daemon under test once for this class."""
         if not POWERD_PATH.is_file():
             raise unittest.SkipTest(f"powerd not found: {POWERD_PATH}")
         if "armada_perf" not in sys.modules:
@@ -105,15 +110,18 @@ class EnterDownloadModeFailureTest(unittest.TestCase):
         cls.module = load_module("armada_powerd_failure_test", POWERD_PATH)
 
     def new_power(self):
+        """Return an ArmadaPower instance with an empty lease table."""
         power = self.module.ArmadaPower.__new__(self.module.ArmadaPower)
         power.download_handles = {}
         return power
 
     def assert_closed(self, fd):
+        """Assert that *fd* is no longer an open descriptor."""
         with self.assertRaises(OSError):
             os.fstat(fd)
 
     def test_append_failure_replies_once_and_closes_both_descriptors(self):
+        """A failing UnixFDList append replies once and closes both pipe ends."""
         module = self.module
         rfd, wfd = os.pipe()
         failing_list = mock.Mock()
@@ -142,6 +150,7 @@ class EnterDownloadModeFailureTest(unittest.TestCase):
             close_quietly(wfd)
 
     def test_pipe_failure_replies_once_without_registration(self):
+        """A failing os.pipe replies once and registers no watch."""
         module = self.module
         fake_glib = mock.Mock()
         invocation = mock.Mock()
@@ -230,6 +239,7 @@ class DownloadModeServer:
     """Publish only the daemon's LowPowerMode1 object on the session bus."""
 
     def __init__(self, powerd_path):
+        """Store the daemon path and clear every server attribute."""
         self.powerd_path = Path(powerd_path)
         self.module = None
         self.power = None
@@ -238,6 +248,7 @@ class DownloadModeServer:
         self.owner_id = None
 
     def load(self):
+        """Load the daemon and expose only its LowPowerMode1 interface."""
         perf_path = find_armada_perf(self.powerd_path)
         # The daemon imports armada_perf at module scope; provide the repo copy
         # first so the installed /usr tree is never used.
@@ -256,10 +267,12 @@ class DownloadModeServer:
         self.power = power
 
     def run(self):
+        """Publish the interface on the session bus until signalled, then exit 0."""
         self.load()
         self.loop = GLib.MainLoop()
 
         def bus_acquired(connection, _name):
+            """Register the LowPowerMode1 object and announce READY on stdout."""
             connection.register_object(
                 self.module.OBJECT_PATH,
                 self.interface,
@@ -271,6 +284,7 @@ class DownloadModeServer:
             sys.stdout.flush()
 
         def name_lost(_connection, _name):
+            """Stop the loop when the bus name is taken away."""
             self.loop.quit()
 
         self.owner_id = Gio.bus_own_name(
@@ -283,6 +297,7 @@ class DownloadModeServer:
         )
 
         def stop(_signum, _frame):
+            """Stop the loop on SIGINT or SIGTERM."""
             self.loop.quit()
 
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -302,6 +317,7 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        """Start a private daemon process and wait until it reports READY."""
         if Gio is None:
             raise unittest.SkipTest(f"PyGObject Gio unavailable: {GI_IMPORT_ERROR}")
         if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
@@ -332,10 +348,12 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        """Stop the daemon process started for this class."""
         cls._stop_server()
 
     @classmethod
     def _stop_server(cls):
+        """Terminate the daemon, close its pipes and join the log drain thread."""
         proc = cls.server_proc
         cls.server_proc = None
         if proc is None:
@@ -357,12 +375,14 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
 
     @classmethod
     def log_tail(cls, count=20):
+        """Return the last *count* daemon stderr lines for failure messages."""
         if not cls.daemon_log:
             return "(no daemon output)"
         return "\n".join(cls.daemon_log[-count:])
 
     @classmethod
     def _wait_ready(cls):
+        """Wait until the daemon prints READY, failing on exit or timeout."""
         stream = cls.server_proc.stdout
         deadline = time.monotonic() + READY_TIMEOUT_S
         while True:
@@ -383,10 +403,12 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
                 return
 
     def setUp(self):
+        """Open the session-bus connection and start tracking leased descriptors."""
         self.connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         self.open_fds = set()
 
     def tearDown(self):
+        """Close descriptors this test kept and require no leaked leases."""
         for fd in list(self.open_fds):
             close_quietly(fd)
         self.open_fds.clear()
@@ -394,6 +416,7 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
                            f"leases leaked by {self.id()}")
 
     def handles_raw(self):
+        """Return the daemon's identifier-to-lease-count table."""
         reply = self.connection.call_sync(
             BUS_NAME,
             OBJECT_PATH,
@@ -408,6 +431,11 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
         return reply.unpack()[0]
 
     def lease(self, identifier):
+        """Lease *identifier* and return the descriptor this test now owns.
+
+        The returned descriptor is the write end whose close releases the
+        lease; dropping the fd list removes only the list's own reference.
+        """
         reply, fd_list = self.connection.call_with_unix_fd_list_sync(
             BUS_NAME,
             OBJECT_PATH,
@@ -457,11 +485,13 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
         self.fail(f"EnterDownloadMode for {identifier!r} unexpectedly succeeded")
 
     def close_lease(self, fd):
+        """Close a leased descriptor while this test still owns it."""
         if fd in self.open_fds:
             os.close(fd)
             self.open_fds.discard(fd)
 
     def _wait_handles(self, predicate, description):
+        """Poll the handle table until *predicate* holds or the deadline expires."""
         deadline = time.monotonic() + LEASE_TIMEOUT_S
         handles = {}
         while time.monotonic() < deadline:
@@ -473,6 +503,7 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
                   + self.log_tail())
 
     def wait_count(self, identifier, expected):
+        """Wait until *identifier* has *expected* leases; zero means absent."""
         if expected:
             return self._wait_handles(
                 lambda handles: handles.get(identifier) == expected,
@@ -482,6 +513,7 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
             f"expected no lease for {identifier!r}")
 
     def assert_stays(self, identifier, expected, duration=0.3):
+        """Assert *identifier* keeps *expected* leases for *duration* seconds."""
         deadline = time.monotonic() + duration
         while time.monotonic() < deadline:
             handles = self.handles_raw()
@@ -491,17 +523,20 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
             time.sleep(0.02)
 
     def test_two_leases_of_same_identifier_are_counted(self):
+        """Two leases of one identifier are counted separately."""
         self.lease("steam-app")
         self.lease("steam-app")
         self.wait_count("steam-app", 2)
 
     def test_separate_identifiers_are_tracked_independently(self):
+        """Each identifier keeps its own lease count."""
         self.lease("steam-app-one")
         self.lease("steam-app-two")
         handles = self.wait_count("steam-app-two", 1)
         self.assertEqual(handles, {"steam-app-one": 1, "steam-app-two": 1})
 
     def test_closing_one_lease_decrements(self):
+        """Closing one of two leases decrements the count."""
         first = self.lease("steam-app")
         self.lease("steam-app")
         self.wait_count("steam-app", 2)
@@ -510,6 +545,7 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
         self.assertEqual(handles, {"steam-app": 1})
 
     def test_duplicated_descriptor_holds_lease_until_last_copy_closes(self):
+        """A dup of the descriptor keeps the lease until the last copy closes."""
         fd = self.lease("steam-app")
         duplicate = os.dup(fd)
         self.open_fds.add(duplicate)
@@ -519,6 +555,7 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
         self.wait_count("steam-app", 0)
 
     def test_closing_every_lease_removes_the_identifier(self):
+        """Closing every lease removes the identifier from the table."""
         leases = [self.lease("steam-app") for _ in range(3)]
         self.wait_count("steam-app", 3)
         for fd in leases:
@@ -527,6 +564,7 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
         self.assertEqual(handles, {})
 
     def test_disconnected_client_drops_its_lease(self):
+        """A client that exits without closing loses its lease."""
         command = [sys.executable, str(Path(__file__).resolve()),
                    "--client-lease", "steam-app"]
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -574,6 +612,7 @@ class LowPowerMode1LeaseTest(unittest.TestCase):
 
 
 def run_client(identifier):
+    """Lease *identifier*, print the observed count, and exit without closing."""
     connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     reply, fd_list = connection.call_with_unix_fd_list_sync(
         BUS_NAME,
@@ -612,6 +651,7 @@ def run_client(identifier):
 
 
 def parse_args(argv):
+    """Split the daemon options from the unittest arguments."""
     powerd = DEFAULT_POWERD
     serve = False
     client_lease = None
@@ -641,6 +681,7 @@ def parse_args(argv):
 
 
 def main(argv):
+    """Dispatch serve, client-lease or unittest mode."""
     global POWERD_PATH
     powerd, serve, client_lease, rest = parse_args(argv)
     POWERD_PATH = Path(powerd).resolve()

@@ -10,7 +10,9 @@ import {
   type PowerState,
 } from "../src/lib/lowPowerDownloads.ts";
 
+/** Build low-power download settings for a test case. */
 const settings = (enabled: boolean, onBattery: boolean): LowPowerDownloadSettings => ({ enabled, onBattery });
+/** Build an AC-connected power state, with overrides for a test case. */
 const power = (overrides: Partial<PowerState> = {}): PowerState => ({
   hasBattery: true,
   acConnected: true,
@@ -18,6 +20,7 @@ const power = (overrides: Partial<PowerState> = {}): PowerState => ({
   ...overrides,
 });
 
+/** Patch a fake window's sleep store and return its recorded calls and cleanup. */
 function installSleepPatch(windowOverrides: Record<string, unknown> = {}) {
   const calls: unknown[][] = [];
   const original = function (this: unknown, ...args: unknown[]) {

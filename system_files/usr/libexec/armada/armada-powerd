@@ -1079,6 +1079,12 @@ class ArmadaPower:
         )
 
     def enter_download_mode(self, identifier, invocation):
+        """Lease a pipe write end for *identifier* and reply with its descriptor.
+
+        The daemon keeps the read end and watches it for HUP/ERR, so the lease
+        lasts until every copy of the returned write end is closed. At the
+        global handle cap the call is rejected before any pipe or count exists.
+        """
         # Steam holds the write end; HUP on ours means every copy is closed.
         if sum(self.download_handles.values()) >= MAX_DOWNLOAD_HANDLES:
             # Reject before os.pipe(): nothing is allocated, no count changes.
@@ -1117,6 +1123,11 @@ class ArmadaPower:
         invocation.return_value_with_unix_fd_list(GLib.Variant("(h)", (0,)), fds)
 
     def download_handle_closed(self, fd, _condition, identifier):
+        """Release one lease after the read end reports HUP or ERR.
+
+        Returns False so the GLib watch is removed once the last copy of the
+        client's write end has closed.
+        """
         os.close(fd)
         count = self.download_handles.get(identifier, 1) - 1
         if count > 0:
