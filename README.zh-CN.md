@@ -34,6 +34,24 @@ tests/                  针对 SM8850 电源配置的回归测试
 
 `decky/armada-control` 路径与 Python 包名 `armada_control` 沿用上游名称，以兼容既有的 Armada 集成。
 
+## `system_files` 中的电源文件
+
+`system_files` 包含两类电源文件。
+
+由本仓库负责、并随本仓库安装进操作系统镜像的正式源码：
+
+- `system_files/usr/libexec/armada/armada-powerd`
+- `system_files/usr/lib/armada/devices/lenovo-tb323fu.conf`
+- `system_files/usr/share/armada/power-profiles-SM8850.conf`
+
+仅供独立测试使用、不会随操作系统构建安装的测试固定文件：
+
+- `system_files/usr/lib/armada/armada_perf.py`
+- `system_files/usr/share/armada/power-profiles.conf`
+- `system_files/usr/share/armada/game-tweaks.json`
+
+上述三个固定文件路径的权威副本由系统仓库所有。本仓库中的副本只为让独立测试可运行，请仅将其视为测试输入，不要当作共享运行时文件的第二份分发来源。
+
 ## 运行要求
 
 Freedom Control 是面向既有 ArmadaOS 或 ArmadaOS Freedom 安装的插件，需要：
