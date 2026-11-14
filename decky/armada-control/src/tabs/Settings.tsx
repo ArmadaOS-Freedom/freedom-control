@@ -18,6 +18,7 @@ import {
   setSwipeGesturesInGameEnabled as applySwipeGesturesInGameEnabled,
   setUsbNetworkEnabled as applyUsbNetworkEnabled,
 } from "../backend";
+import { GameModeOrientationSetting } from "../components/GameModeOrientationSetting";
 import { HomePowerSetting } from "../components/HomePowerSetting";
 import { SelectEdit, SliderEdit, ToggleRow } from "../components/widgets";
 import { useDebouncedApply } from "../hooks/useDebouncedApply";
@@ -261,6 +262,7 @@ export function Settings({ config, setConfig }: {
   return (
     <>
       <PanelSection title={t("settings.system")}>
+        <GameModeOrientationSetting />
         <HomePowerSetting />
         <ToggleRow
           label={t("settings.swipeGestures")}

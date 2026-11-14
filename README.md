@@ -12,6 +12,7 @@ Freedom Control reuses the Armada Control plugin architecture and host-service i
 
 The current snapshot provides:
 
+- **Game Mode display orientation**: override the native direction, rotate left or right by 90 degrees, or rotate by 180 degrees, with touch coordinates following the display. The control appears in System above Steam UI power saving. Save the choice, then select Apply Orientation and confirm to restart the entire Game Mode session. Turning the override off follows the device default. Matching ArmadaOS Freedom system components are required.
 - **Per-game and global controls** for compatibility and performance settings, so a title can inherit the global configuration or override it individually.
 - **Layered configuration** for shared, SoC-specific, and user profiles. Profile values can be defined once for all devices, refined per SoC, and overridden by the user.
 - **Initial Lenovo Legion Tab Y700 Gen 5 (TB323FU, SM8850) support**, including an initial device/SoC profile with CPU frequency caps and core metadata.

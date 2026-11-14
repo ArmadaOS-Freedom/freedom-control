@@ -92,6 +92,17 @@ export interface HomePowerState {
   reason: string;
 }
 
+// Panel axes, not a landscape/portrait flag: "normal" is whatever the panel
+// reports natively, so every orientation is relative to that.
+export type DisplayOrientation = "normal" | "left" | "right" | "upsidedown";
+
+export interface DisplayOrientationState {
+  supported: boolean;
+  // Empty means the Game Mode override is off.
+  orientation: DisplayOrientation | "";
+  defaultOrientation: DisplayOrientation;
+}
+
 export interface CalibrationState {
   supported: boolean;
   reason: string;
