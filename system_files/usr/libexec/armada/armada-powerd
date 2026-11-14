@@ -278,6 +278,7 @@ class ArmadaPower:
         self.scx_spec = None
         self.scx_failed = None
         self.scx_warned = set()
+        self.cap_miss_warned = set()
         self.load_config()
         self.profile = self.default_profile
         self.discover()
@@ -660,14 +661,69 @@ class ArmadaPower:
         except ValueError:
             return -1
 
-    def cpu_max_target(self, settings, policy_id, freqs):
+    def policy_cpus(self, policy):
+        """Member CPU ids of one cpufreq policy, ascending.
+
+        Read from ``related_cpus``; a missing or unreadable file yields an
+        empty list.
+        """
+        return ints_from_file(policy / "related_cpus")
+
+    def policy_cap(self, caps, policy_id, cpus):
+        """Return the cap this policy inherits from ``caps``, else ``None``.
+
+        The exact policy id is the primary key; only when it is absent are the
+        cluster's member ``cpus`` tried, in ascending order, so a table keyed
+        by the cluster's first CPU still lands on the right policy.
+        """
+        # Tables are keyed by the cluster's first CPU. A policy is named after
+        # the first CPU that came online, so on a part with fused-off cores
+        # (six-core SM8650: CPUs 1-2 absent, middle cluster is policy3) the
+        # name differs; fall back to the cluster's member CPUs.
+        if policy_id in caps:
+            return caps[policy_id]
+        for cpu in cpus:
+            if cpu in caps:
+                return caps[cpu]
+        return None
+
+    def cpu_max_target(self, settings, policy_id, freqs, cpus=()):
+        """Resolve the scaling_max_freq ceiling for one policy, in kHz.
+
+        ``settings["cpu_max_policy"]`` is per policy: the exact policy id wins
+        and member ``cpus`` are consulted only when it is absent. No entry
+        therefore means the table caps nothing for this cluster and the tier
+        is the top OPP, still subject to the SoC rule below; an empty table
+        means the profile is deliberately uncapped. Neither is an error, and
+        an empty table never warns. For SM8850 and any SoC carrying an
+        underclock table the first such miss per policy prints one stderr
+        line, remembered in ``cap_miss_warned`` for the rest of the daemon's
+        lifetime so profile switches and reloads stay quiet.
+
+        SM8850 returns the lower of that tier and the ``cpu_max`` ratio; other
+        underclocked SoCs let the table tier win outright, and SoCs without an
+        underclock table use the ratio alone.
+        """
+        caps = settings["cpu_max_policy"]
+        tier = self.policy_cap(caps, policy_id, cpus)
+        if tier is None:
+            tier = freqs[-1]
+            # An empty table means the profile is deliberately uncapped; a
+            # table without this cluster leaves it at full speed, so say so
+            # once per policy instead of on every profile apply.
+            if caps and policy_id not in self.cap_miss_warned and (
+                    self.cpu_device_class() == "SM8850"
+                    or self.cpu_device_class() in self.underclock_config):
+                self.cap_miss_warned.add(policy_id)
+                print(f"armada-powerd: no cpu_max_policy entry for policy{policy_id} "
+                      f"(cpus {' '.join(map(str, cpus)) or '?'}); leaving it uncapped",
+                      file=sys.stderr)
         if self.cpu_device_class() == "SM8850":
             # SM8850's floor table must not bypass a saved cpu_max ratio, even
             # when the profile selects no underclock level.
-            tier = settings["cpu_max_policy"].get(policy_id, freqs[-1])
             return min(tier, int(freqs[-1] * settings["cpu_max"]))
         if self.cpu_device_class() in self.underclock_config:
-            return settings["cpu_max_policy"].get(policy_id, freqs[-1])
+            return tier
         return int(freqs[-1] * settings["cpu_max"])
 
     def profile_settings(self):
@@ -704,7 +760,8 @@ class ArmadaPower:
                 continue
             self.write_governor(policy, settings["cpu_governor"])
             write_text(policy / "scaling_min_freq", freqs[0])
-            target = self.cpu_max_target(settings, self.policy_id(policy), freqs)
+            target = self.cpu_max_target(
+                settings, self.policy_id(policy), freqs, self.policy_cpus(policy))
             write_text(policy / "scaling_max_freq", self.choose_at_most(freqs, target))
         if self.gpu and self.gpu_level == "auto":
             self.apply_gpu_auto(settings)
@@ -717,7 +774,8 @@ class ArmadaPower:
             if not freqs:
                 continue
             policy_id = self.policy_id(policy)
-            target = self.cpu_max_target(settings, policy_id, freqs)
+            target = self.cpu_max_target(
+                settings, policy_id, freqs, self.policy_cpus(policy))
             caps[f"policy{policy_id}"] = self.choose_at_most(freqs, target)
         return caps
 

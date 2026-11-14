@@ -18,8 +18,10 @@ Run with the standard library only::
 """
 
 import configparser
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import shutil
 import sys
@@ -167,12 +169,19 @@ class DaemonConfigTest(unittest.TestCase):
             CHIP_FIXTURE, encoding="utf-8")
 
     def daemon(self, soc="SM8850", etc_text=None, factory=None):
+        """Build an ArmadaPower without running ``__init__``.
+
+        Configuration paths are repointed at the temporary copies, ``env``
+        carries only the SoC class, and ``cap_miss_warned`` starts empty so
+        every test observes the daemon's first warning.
+        """
         if etc_text is not None:
             self.etc.write_text(etc_text, encoding="utf-8")
         POWERD.FACTORY_CONFIG_FILE = factory or self.factory
         POWERD.CONFIG_FILE = self.etc
         power = POWERD.ArmadaPower.__new__(POWERD.ArmadaPower)
         power.env = {"ARMADA_SOC_CLASS": soc} if soc else {}
+        power.cap_miss_warned = set()
         return power
 
     def test_chip_layer_only_overrides_its_own_fields(self):
@@ -266,6 +275,81 @@ class DaemonConfigTest(unittest.TestCase):
             power.cpu_max_target(settings, 0, OPP[0]), 2227200)
         self.assertEqual(
             power.cpu_max_target(settings, 6, OPP[6]), 2246400)
+
+    def test_underclock_matches_policies_by_cluster_cpus(self):
+        """A policy named after a later CPU still gets its cluster's cap.
+
+        The six-core SM8650 (CPUs 1-2 absent) exposes policy0/3/5/7, the
+        eight-core one policy0/2/5/7; the factory table uses policy2 for the
+        middle cluster, so both layouts must cap it.  Lookup is per-policy
+        first: only a missing policy id falls back to the member CPUs.
+        """
+        freqs = {
+            0: [1459200, 1689600, 1939200, 2265600],
+            2: [2035200, 2323200, 2764800, 2956800],
+            5: [2035200, 2323200, 2764800, 2956800],
+            7: [2112000, 2438400, 2937600, 3052800],
+        }
+        layouts = {
+            "six-core": {0: [0, 1], 3: [2, 3, 4], 5: [5, 6], 7: [7]},
+            "eight-core": {0: [0, 1], 2: [2, 3, 4], 5: [5, 6], 7: [7]},
+        }
+        for name, layout in layouts.items():
+            with self.subTest(layout=name):
+                power = self.daemon(soc="SM8650", factory=PUBLIC_PROFILES)
+                (_default, underclocks, _curves, profiles,
+                 _fan, _suspend, _system) = power.parse_config()
+                power.underclock_config = underclocks
+                power.profile_config = profiles
+                power.profile = "balanced"
+                power.apply_underclock_refs()
+                self.assertEqual(profiles["balanced"]["cpu_underclock"], "medium")
+                root = self.tmp / name
+                power.cpu_policies = []
+                for policy_id, cpus in layout.items():
+                    policy = root / f"policy{policy_id}"
+                    policy.mkdir(parents=True)
+                    (policy / "related_cpus").write_text(
+                        " ".join(map(str, cpus)) + "\n", encoding="utf-8")
+                    (policy / "scaling_available_frequencies").write_text(
+                        " ".join(map(str, freqs[cpus[0]])) + "\n",
+                        encoding="utf-8")
+                    power.cpu_policies.append(policy)
+                middle = "policy3" if name == "six-core" else "policy2"
+                self.assertEqual(power.resolved_cpu_caps(), {
+                    "policy0": 1689600,
+                    middle: 2323200,
+                    "policy5": 2323200,
+                    "policy7": 2438400,
+                })
+                power.gpu = None
+                power.apply_profile()
+                self.assertEqual(
+                    (root / middle / "scaling_max_freq").read_text(
+                        encoding="utf-8").strip(), "2323200")
+
+    def test_policy_missing_from_selected_table_warns_once(self):
+        """A non-empty table without this policy leaves it uncapped, warns once.
+
+        The warning is keyed by policy id and remembered on the daemon, so
+        repeated applies stay quiet; an empty table means no cap by design and
+        never warns.
+        """
+        power = POWERD.ArmadaPower.__new__(POWERD.ArmadaPower)
+        power.env = {"ARMADA_SOC_CLASS": "SM8650"}
+        power.underclock_config = {"SM8650": {"medium": {0: 1689600}}}
+        power.cap_miss_warned = set()
+        capped = {"cpu_max": 1.0, "cpu_max_policy": {0: 1689600}}
+        uncapped = {"cpu_max": 1.0, "cpu_max_policy": {}}
+        freqs = [2035200, 2956800]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(3):
+                self.assertEqual(
+                    power.cpu_max_target(capped, 3, freqs, [2, 3, 4]), 2956800)
+            power.cpu_max_target(uncapped, 5, freqs, [5, 6])
+        self.assertEqual(err.getvalue().count("no cpu_max_policy entry"), 1)
+        self.assertIn("policy3", err.getvalue())
 
     def test_factory_tiers_use_real_opp_and_are_monotonic(self):
         self.assertTrue(SM8850_PROFILES.is_file(),
