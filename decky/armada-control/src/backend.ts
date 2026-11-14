@@ -1,5 +1,5 @@
 import { call } from "@decky/api";
-import type { CalibrationState, CompatAppliedState, Config, CurvesState, FanCurve, FanSettings, HomePowerState, InstalledGame, PowerConfig, RgbConfig, Tweaks } from "./types";
+import type { CompatAppliedState, Config, CurvesState, FanCurve, FanSettings, HomePowerState, InstalledGame, PowerConfig, RgbConfig, Tweaks } from "./types";
 
 export const getConfig = () => call<[], Config>("get_config");
 export const getInstalledGames = () => call<[], InstalledGame[]>("get_installed_games");
@@ -31,7 +31,6 @@ export const getSleepLogsEnabled = () => call<[], boolean>("get_sleep_logs_enabl
 export const setSleepLogsEnabled = (enabled: boolean) => call<[boolean], boolean>("set_sleep_logs_enabled", enabled);
 export const reapplyPerf = () => call<[], { pids?: number }>("reapply_perf");
 export const restartGameMode = () => call<[], boolean>("restart_game_mode");
-export const setControllerType = (value: string) => call<[string], string>("set_controller_type", value);
 export const getRgb = () => call<[], RgbConfig | null>("get_rgb");
 export const setRgb = (
   enabled: boolean,
@@ -50,12 +49,6 @@ export const setRgb = (
     maxBrightness,
     brightness,
   );
-export const getControllerState = () => call<[], CalibrationState>("get_controller_state");
-export const startCalibrationRecording = () => call<[], CalibrationState>("start_calibration_recording");
-export const saveCalibration = () => call<[], CalibrationState>("save_calibration");
-export const resetCalibration = () => call<[], CalibrationState>("reset_calibration");
-export const beginCalibrationSession = (token: string) => call<[string], boolean>("begin_calibration_session", token);
-export const endCalibrationSession = (token: string) => call<[string], boolean>("end_calibration_session", token);
 export const setChargingFanPwm = (pwm: number) => call<[number], number>("set_charging_fan_pwm", pwm);
 export const getFansState = () => call<[], CurvesState>("get_fans_state");
 export const saveFanCurves = (fanCurves: Record<string, FanCurve>, fanSettings: FanSettings) =>

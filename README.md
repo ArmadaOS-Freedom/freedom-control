@@ -34,6 +34,24 @@ tests/                  Focused SM8850 power-profile regression tests
 
 The paths `decky/armada-control` and the Python package `armada_control` keep those upstream names for compatibility with existing Armada integration.
 
+## Power files in `system_files`
+
+`system_files` holds two kinds of power files.
+
+Canonical sources owned here and installed into the OS image from this repository:
+
+- `system_files/usr/libexec/armada/armada-powerd`
+- `system_files/usr/lib/armada/devices/lenovo-tb323fu.conf`
+- `system_files/usr/share/armada/power-profiles-SM8850.conf`
+
+Standalone-test fixtures used by this repository's test suites and never installed by the OS build:
+
+- `system_files/usr/lib/armada/armada_perf.py`
+- `system_files/usr/share/armada/power-profiles.conf`
+- `system_files/usr/share/armada/game-tweaks.json`
+
+The system repository owns the authoritative copies of the three fixture paths. The copies here exist so the standalone tests can run; treat them as test inputs only and do not treat them as a second distribution of shared runtime files.
+
 ## Runtime requirements
 
 Freedom Control is a plugin for an existing ArmadaOS or ArmadaOS Freedom installation. It requires:

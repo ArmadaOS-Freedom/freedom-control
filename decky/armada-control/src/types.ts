@@ -101,19 +101,6 @@ export interface CalibrationState {
   backend?: string;
   saved?: boolean;
   params?: Record<string, number>;
-  progress?: CalibrationProgress;
-}
-
-export type StickSide = "left" | "right" | "up" | "down";
-
-export type StickProgress = Record<StickSide, number>;
-
-export interface CalibrationProgress {
-  left_stick: StickProgress;
-  right_stick: StickProgress;
-  left_trigger: number;
-  right_trigger: number;
-  ready: boolean;
 }
 
 export interface RgbConfig {
@@ -170,9 +157,6 @@ export interface Config {
   desktopModes: DropdownChoice[];
   sleepMode: string;
   sleepModes: DropdownChoice[];
-  controllerType: string;
-  controllerTypes: DropdownChoice[];
-  calibration?: CalibrationState;
   game?: GameRef | null;
   selectedGame?: GameRef | null;
 }
