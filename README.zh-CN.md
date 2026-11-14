@@ -16,6 +16,7 @@ Freedom Control 沿用 Armada Control 的插件架构与宿主服务接口，保
 - **分层配置**：支持共享、SoC 专用和用户配置三个层次。同一配置项可以面向所有设备定义一次，再按 SoC 细化，并由用户覆盖。
 - **初始支持 Lenovo Legion Tab Y700 Gen 5（TB323FU，SM8850）**：包含初始设备/SoC 配置，提供 CPU 频率上限和核心元数据。
 - **CPU governor 显示名称**：界面以可读名称显示所选 governor，而不只是内核标识符。
+- **TF 卡游戏库标签页**：把已分配 TF 卡的 Linux 保留分区转换为 Steam 游戏库，同时保留该卡的 Android 存储。
 
 SM8850 目前处于基础集成阶段，性能调优仍在进行。
 
@@ -61,6 +62,21 @@ Freedom Control 是面向既有 ArmadaOS 或 ArmadaOS Freedom 安装的插件，
 
 仅安装插件不会安装 `system_files` 下的配套组件；这些组件属于操作系统镜像的一部分，需要在构建系统时集成。本仓库不提供自动化的特权部署步骤。
 
+## TF 卡游戏库
+
+**TF** 图标标签页会把 TF 卡的 Linux 保留分区转换为 Armada/Steam 游戏库，同时保留该卡的 Android 存储。标签页位于可选的散热/RGB 标签页与高级标签页之间。
+
+1. **先在 Android 上分配。** 使用 [智能TF卡分配器](https://github.com/mydanyi/smart-tf-allocator)（[APK 下载](https://github.com/mydanyi/smart-tf-allocator/releases/latest)）完成分配。无需安装原 Armada Installer 插件。
+2. **插入 TF 卡并打开 TF 标签页。** 重新扫描、选择该卡，然后检查。
+3. **确认。** 对话框会重述 TF 卡、Linux 保留分区与两侧容量；取消不会产生任何更改。
+
+- 仅格式化 Linux 保留分区（p1）为 ext4 并挂载；Android 元数据与私有分区（p2/p3）及其数据都会保留。
+- 已包含 Armada 游戏库的卡会直接挂载并重新接入 Steam，不会格式化；已有 ext4 卡不会被自动重新格式化。
+- 页面显示真实阶段与不确定进度条、详情开关、两种成功结果（已接入 Steam / 已挂载等待 Steam）、绝不格式化的重试接入操作，以及失败重试和显式返回卡列表操作。
+- 仅在 TF 标签页打开时进行卡探测与状态轮询。切换标签页或关闭面板会卸载页面并停止轮询；systemd 转换任务会继续运行，重新打开面板会恢复运行中/成功/失败状态。
+
+设备端运行要求：`systemd`；`util-linux`（`sfdisk`、`lsblk`、`findmnt`）；`gdisk`/`sgdisk`；`e2fsprogs`（`mkfs.ext4`）；`udev`；以及 `/usr/lib/hwsupport/steamos-automount.sh`。
+
 ## 开发
 
 开发环境使用 Node.js 22.23.3 或 Node.js 24。在仓库根目录执行：
@@ -89,5 +105,7 @@ python3 tests/sm8850-power-test.py
 Freedom Control 源自 Armada 项目的 Armada Control。原始插件、宿主服务与配置的版权归 Armada 贡献者所有。Freedom 相关修改（包括 SM8850 配置分层与 CPU 频率上限，以及重命名和 governor 显示名称）来自 [mydanyi/armadaos-freedom](https://github.com/mydanyi/armadaos-freedom)。
 
 源码快照基于 [提交 `5c560b965d040c07cc76e4a3dd78afaba3fcc796`](https://github.com/mydanyi/armadaos-freedom/tree/5c560b965d040c07cc76e4a3dd78afaba3fcc796/decky/armada-control)，并包含上述既有的 Freedom Control 修改。
+
+TF 卡游戏库页面移植自 [Armada Installer](https://github.com/mydanyi/armada-installer)（`1ac40b959085e6b55c2aef1467080b07560a2431`），保留原作者与来源。其系统安装页面、语言选择与作者面板未迁移；移植后的 TF 代码经原作者同意，作为本项目的一部分依据 GNU 通用公共许可证第 2 版分发。
 
 本项目依据 GNU 通用公共许可证第 2 版分发。参见 [LICENSE](LICENSE)。

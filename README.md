@@ -16,6 +16,7 @@ The current snapshot provides:
 - **Layered configuration** for shared, SoC-specific, and user profiles. Profile values can be defined once for all devices, refined per SoC, and overridden by the user.
 - **Initial Lenovo Legion Tab Y700 Gen 5 (TB323FU, SM8850) support**, including an initial device/SoC profile with CPU frequency caps and core metadata.
 - **CPU governor labels** in the interface, so the selected governor is shown with a readable name rather than only its kernel identifier.
+- **TF card game library tab**, which turns the Linux reserve partition of a prepared TF card into a Steam game library without touching the card's Android storage.
 
 SM8850 support is at the initial integration stage; performance tuning is ongoing.
 
@@ -61,6 +62,21 @@ Freedom Control is a plugin for an existing ArmadaOS or ArmadaOS Freedom install
 
 Installing only the plugin does not install the companion components under `system_files`; those are part of the operating system image and must be integrated when the OS is built. This repository does not provide an automatic privileged deployment step.
 
+## TF card game library
+
+The **TF** icon tab turns the Linux reserve partition of a TF card into an Armada/Steam game library while keeping the card's Android storage. It sits between the optional fan/RGB tabs and the Advanced tab.
+
+1. **On Android first.** Allocate the card with [Smart TF Card Allocator (智能TF卡分配器)](https://github.com/mydanyi/smart-tf-allocator) ([APK download](https://github.com/mydanyi/smart-tf-allocator/releases/latest)). The original Armada Installer plugin is not required.
+2. **Insert the card and open the TF tab.** Rescan, select the card, then review.
+3. **Confirm.** The dialog restates the card, the Linux reserve partition and both sizes; cancel changes nothing.
+
+- Only the Linux reserve partition (p1) is formatted to ext4 and mounted. The Android metadata/private partitions (p2/p3) and their data are kept.
+- A card that already holds an Armada library is mounted and reconnected to Steam without formatting; an existing ext4 card is never reformatted automatically.
+- The page shows the real stage with an indeterminate progress bar, a details toggle, both success outcomes (connected to Steam vs. mounted and waiting for Steam), the retry-connect action that never formats, and failure/retry plus an explicit back-to-cards action.
+- Card probing and status polling run only while the TF tab is open. Switching tabs or closing the panel unmounts the page and stops polling; the systemd conversion job keeps running, and reopening the panel resumes the running/succeeded/failed state.
+
+Runtime requirements on the device: `systemd`; `util-linux` (`sfdisk`, `lsblk`, `findmnt`); `gdisk`/`sgdisk`; `e2fsprogs` (`mkfs.ext4`); `udev`; and `/usr/lib/hwsupport/steamos-automount.sh`.
+
 ## Development
 
 Use Node.js 22.23.3 or Node.js 24 for development. From the repository root:
@@ -89,5 +105,7 @@ Native Steam performance preset identifiers remain `Eco`, `Balanced`, and `Perfo
 Freedom Control is derived from Armada Control by the Armada project. Credit for the original plugin, host services, and configuration belongs to the Armada contributors. Freedom-specific modifications, including the SM8850 configuration layering and CPU frequency caps plus the rename and governor labels, come from [mydanyi/armadaos-freedom](https://github.com/mydanyi/armadaos-freedom).
 
 The source snapshot is based on [commit `5c560b965d040c07cc76e4a3dd78afaba3fcc796`](https://github.com/mydanyi/armadaos-freedom/tree/5c560b965d040c07cc76e4a3dd78afaba3fcc796/decky/armada-control), together with the existing Freedom Control modifications noted above.
+
+The TF card game library page is ported from [Armada Installer](https://github.com/mydanyi/armada-installer) (`1ac40b959085e6b55c2aef1467080b07560a2431`); the original author and source are retained. Its system-install page, language selector and author panel were not migrated, and the ported TF code is distributed as part of this project under the GNU General Public License v2.0 with the original author's approval.
 
 This project is distributed under the GNU General Public License v2.0. See [LICENSE](LICENSE).

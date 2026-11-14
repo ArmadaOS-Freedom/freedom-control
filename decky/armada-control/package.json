@@ -4,8 +4,9 @@
   "type": "module",
   "scripts": {
     "build": "shx rm -rf dist && rollup -c",
-    "test": "node --experimental-strip-types --test test/*.test.ts && npm run test:i18n",
+    "test": "node --experimental-strip-types --test test/*.test.ts && npm run test:i18n && npm run test:tf-integration",
     "test:i18n": "node tests/i18n.test.mjs",
+    "test:tf-integration": "node tests/tf_integration.test.mjs",
     "watch": "rollup -c -w"
   },
   "dependencies": {

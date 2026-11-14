@@ -26,6 +26,7 @@ from armada_control.tweaks import load_compat_applied, save_compat_applied, save
 from armada_control.fan_curves import get_state as get_fans_state, save_all as save_fan_curves, save_charging_pwm
 from armada_control.fan_sensors import get_current_temp
 from armada_control.home_power import HomePower
+from armada_control.tf_library.service import InstallerError, TfLibraryService
 
 logger = logging.getLogger("armada-control")
 
@@ -33,6 +34,7 @@ logger = logging.getLogger("armada-control")
 class Plugin:
     def __init__(self):
         self._home_power = HomePower()
+        self._tf = TfLibraryService()
 
     async def _main(self):
         try:
@@ -159,3 +161,28 @@ class Plugin:
     # Polled separately from get_fans_state -- see hooks/useCurrentTemp.
     async def get_current_temp(self):
         return await asyncio.to_thread(get_current_temp)
+
+    # TF-card library page: the migrated installer backend behind one envelope
+    # so the UI never sees a traceback, with the blocking work offloaded to a
+    # thread like every other RPC above.
+    async def _call_tf(self, function, *args):
+        try:
+            data = await asyncio.to_thread(function, *args)
+        except InstallerError as error:
+            return {"ok": False, "error": error.code, "detail": error.detail}
+        except Exception:
+            # Never surface an unexpected traceback or internal detail to the UI.
+            return {"ok": False, "error": "internal_error", "detail": ""}
+        return {"ok": True, "data": data}
+
+    async def get_tf_inspection(self):
+        return await self._call_tf(self._tf.inspect)
+
+    async def prepare_tf_library(self, device):
+        return await self._call_tf(self._tf.prepare, device)
+
+    async def start_tf_library(self, token, confirmed=False):
+        return await self._call_tf(self._tf.start, token, confirmed)
+
+    async def get_tf_status(self):
+        return await self._call_tf(self._tf.status)
