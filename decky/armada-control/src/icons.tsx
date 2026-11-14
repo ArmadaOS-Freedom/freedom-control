@@ -71,6 +71,20 @@ export const tabIcons = {
       }
     />
   ),
+  // "sd-card" storage icon: a card body with the notch and contact rows.
+  TF: (
+    <Icon
+      size={TAB_ICON_SIZE}
+      path={
+        <>
+          <path d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z" />
+          <path d="M10 9H8" />
+          <path d="M16 13H8" />
+          <path d="M16 17H8" />
+        </>
+      }
+    />
+  ),
   Advanced: (
     <Icon
       size={TAB_ICON_SIZE}

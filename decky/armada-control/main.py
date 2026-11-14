@@ -1,16 +1,7 @@
 import asyncio
 import logging
 
-from armada_control.calibration import (
-    begin_session,
-    controller_state,
-    end_session,
-    reset_calibration_params,
-    save_calibration,
-    start_recording,
-)
 from armada_control.config import build_config
-from armada_control.controller import set_controller_type
 from armada_control.display_orientation import get_display_orientation, set_display_orientation
 from armada_control.power import save_power_config
 from armada_control.rgb import get_rgb, set_rgb
@@ -36,6 +27,7 @@ from armada_control.tweaks import load_compat_applied, save_compat_applied, save
 from armada_control.fan_curves import get_state as get_fans_state, save_all as save_fan_curves, save_charging_pwm
 from armada_control.fan_sensors import get_current_temp
 from armada_control.home_power import HomePower
+from armada_control.tf_library.service import InstallerError, TfLibraryService
 
 logger = logging.getLogger("armada-control")
 
@@ -43,6 +35,7 @@ logger = logging.getLogger("armada-control")
 class Plugin:
     def __init__(self):
         self._home_power = HomePower()
+        self._tf = TfLibraryService()
 
     async def _main(self):
         try:
@@ -149,9 +142,6 @@ class Plugin:
     async def restart_game_mode(self):
         return await asyncio.to_thread(restart_game_mode)
 
-    async def set_controller_type(self, value):
-        return await asyncio.to_thread(set_controller_type, value)
-
     async def get_rgb(self):
         return await asyncio.to_thread(get_rgb)
 
@@ -166,24 +156,6 @@ class Plugin:
             brightness,
         )
 
-    async def get_controller_state(self):
-        return await asyncio.to_thread(controller_state)
-
-    async def start_calibration_recording(self):
-        return await asyncio.to_thread(start_recording)
-
-    async def save_calibration(self):
-        return await asyncio.to_thread(save_calibration)
-
-    async def reset_calibration(self):
-        return await asyncio.to_thread(reset_calibration_params)
-
-    async def begin_calibration_session(self, token=None):
-        return await asyncio.to_thread(begin_session, token)
-
-    async def end_calibration_session(self, token=None):
-        return await asyncio.to_thread(end_session, token)
-
     async def get_fans_state(self):
         return await asyncio.to_thread(get_fans_state)
 
@@ -196,3 +168,28 @@ class Plugin:
     # Polled separately from get_fans_state -- see hooks/useCurrentTemp.
     async def get_current_temp(self):
         return await asyncio.to_thread(get_current_temp)
+
+    # TF-card library page: the migrated installer backend behind one envelope
+    # so the UI never sees a traceback, with the blocking work offloaded to a
+    # thread like every other RPC above.
+    async def _call_tf(self, function, *args):
+        try:
+            data = await asyncio.to_thread(function, *args)
+        except InstallerError as error:
+            return {"ok": False, "error": error.code, "detail": error.detail}
+        except Exception:
+            # Never surface an unexpected traceback or internal detail to the UI.
+            return {"ok": False, "error": "internal_error", "detail": ""}
+        return {"ok": True, "data": data}
+
+    async def get_tf_inspection(self):
+        return await self._call_tf(self._tf.inspect)
+
+    async def prepare_tf_library(self, device):
+        return await self._call_tf(self._tf.prepare, device)
+
+    async def start_tf_library(self, token, confirmed=False):
+        return await self._call_tf(self._tf.start, token, confirmed)
+
+    async def get_tf_status(self):
+        return await self._call_tf(self._tf.status)

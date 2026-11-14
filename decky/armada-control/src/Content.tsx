@@ -13,10 +13,16 @@ import { Compatibility } from "./tabs/Compatibility";
 import { Fans } from "./tabs/Fans";
 import { Power } from "./tabs/Power";
 import { Settings } from "./tabs/Settings";
+import { TfLibraryContent } from "./tf/TfLibraryContent";
+import type { Locale as TfLocale } from "./tf/i18n";
+import { tfText } from "./tf/tf_i18n";
 import type { Config } from "./types";
 
 export function Content() {
-  useLocale();
+  // The TF page was written for en/zh only; the other Controller locales keep
+  // their own UI language and read the TF tab in English.
+  const locale = useLocale();
+  const tfLocale: TfLocale = locale === "zh-CN" ? "zh" : "en";
   const [tab, setTab] = useState("Compatibility");
   const [config, setConfig] = useState<Config | null>(null);
   const [message, setMessage] = useState("Loading");
@@ -84,6 +90,7 @@ export function Content() {
   const tabContent = (content: ReactNode) => (
     <div className="armada-control-tab-content">{content}</div>
   );
+  const tfTabLabel = tfText(tfLocale, "tf.title");
   return (
     <div className="armada-control-tabs">
       <style>{styles}</style>
@@ -99,6 +106,18 @@ export function Content() {
           ...(config.rgbSupported ? [
             { id: "RGB", title: tabIcons.RGB, content: tabContent(<RgbLighting />) },
           ] : []),
+          // Mounted only while its tab is active: switching away unmounts the
+          // page and stops the card probe/status poll. The systemd conversion
+          // job keeps running independently and a reopen resumes its status.
+          {
+            id: "TF",
+            title: (
+              <span role="img" aria-label={tfTabLabel} title={tfTabLabel}>
+                {tabIcons.TF}
+              </span>
+            ),
+            content: tabContent(tab === "TF" ? <TfLibraryContent locale={tfLocale} /> : null),
+          },
           { id: "Advanced", title: tabIcons.Advanced, content: tabContent(<Settings config={config} setConfig={setConfig} />) },
         ]}
       />
