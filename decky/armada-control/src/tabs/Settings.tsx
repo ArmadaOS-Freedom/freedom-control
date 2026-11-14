@@ -23,12 +23,19 @@ import { SelectEdit, SliderEdit, ToggleRow } from "../components/widgets";
 import { useDebouncedApply } from "../hooks/useDebouncedApply";
 import { t, translateLabel } from "../i18n";
 import { percentToPwm, pwmToPercent } from "../lib/fanCurve";
+import {
+  getLowPowerDownloadSettings,
+  setLowPowerDownloadsEnabled as applyLowPowerDownloadsEnabled,
+  setLowPowerDownloadsOnBattery as applyLowPowerDownloadsOnBattery,
+  type LowPowerDownloadSettings,
+} from "../lib/lowPowerDownloads";
 import type { Config } from "../types";
 
 const BOTTOM_SCREEN_BRIGHTNESS_DELAY_MS: number = 150;
 // Each apply reloads armada-powerd.
 const CHARGING_FAN_DELAY_MS: number = 500;
 
+/** Settings tab: system, experimental and diagnostics panels. */
 export function Settings({ config, setConfig }: {
   config: Config;
   setConfig: Dispatch<SetStateAction<Config | null>>;
@@ -37,6 +44,9 @@ export function Settings({ config, setConfig }: {
   const [swipeGesturesInGameSaving, setSwipeGesturesInGameSaving] = useState(false);
   const [sleepLogsEnabled, setSleepLogsEnabled] = useState<boolean | null>(null);
   const [sleepLogsSaving, setSleepLogsSaving] = useState(false);
+  const [lowPowerDownloads, setLowPowerDownloads] = useState<LowPowerDownloadSettings | null>(null);
+  const [lowPowerDownloadsSaving, setLowPowerDownloadsSaving] = useState(false);
+  const [lowPowerDownloadsBatterySaving, setLowPowerDownloadsBatterySaving] = useState(false);
   const usbSettingsBusy = useRef(false);
   const [usbSettingsSaving, setUsbSettingsSaving] = useState(false);
   const setBottomScreenBrightness = useDebouncedApply(
@@ -60,6 +70,14 @@ export function Settings({ config, setConfig }: {
       .then((enabled) => { if (!cancelled) setSleepLogsEnabled(enabled); })
       .catch(() => { if (!cancelled) setSleepLogsEnabled(false); });
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    try {
+      setLowPowerDownloads(getLowPowerDownloadSettings());
+    } catch (error) {
+      setLowPowerDownloads({ enabled: false, onBattery: false });
+    }
   }, []);
 
   useEffect(() => {
@@ -212,6 +230,34 @@ export function Settings({ config, setConfig }: {
       setSleepLogsSaving(false);
     }
   };
+  /** Save the master low-power download toggle, rolling back on failure. */
+  const setLowPowerDownloadsEnabled = async (enabled: boolean) => {
+    if (lowPowerDownloadsSaving) return;
+    setLowPowerDownloads((current) => (current ? { ...current, enabled } : current));
+    setLowPowerDownloadsSaving(true);
+    try {
+      await applyLowPowerDownloadsEnabled(enabled);
+    } catch (error) {
+      setLowPowerDownloads((current) => (current ? { ...current, enabled: !enabled } : current));
+      toaster.toast({ title: t("settings.lowPowerDownloadsError"), body: String(error) });
+    } finally {
+      setLowPowerDownloadsSaving(false);
+    }
+  };
+  /** Save the on-battery low-power download toggle, rolling back on failure. */
+  const setLowPowerDownloadsOnBattery = async (onBattery: boolean) => {
+    if (lowPowerDownloadsBatterySaving) return;
+    setLowPowerDownloads((current) => (current ? { ...current, onBattery } : current));
+    setLowPowerDownloadsBatterySaving(true);
+    try {
+      await applyLowPowerDownloadsOnBattery(onBattery);
+    } catch (error) {
+      setLowPowerDownloads((current) => (current ? { ...current, onBattery: !onBattery } : current));
+      toaster.toast({ title: t("settings.lowPowerDownloadsError"), body: String(error) });
+    } finally {
+      setLowPowerDownloadsBatterySaving(false);
+    }
+  };
   return (
     <>
       <PanelSection title={t("settings.system")}>
@@ -235,6 +281,22 @@ export function Settings({ config, setConfig }: {
           options={(config.sleepModes || []).map((option) => ({ ...option, label: translateLabel(option.label) }))}
           onChange={setSleepMode}
         />
+        <ToggleRow
+          label={t("settings.lowPowerDownloads")}
+          description={t("settings.lowPowerDownloadsDescription")}
+          value={!!lowPowerDownloads?.enabled}
+          disabled={lowPowerDownloads === null || lowPowerDownloadsSaving}
+          onChange={setLowPowerDownloadsEnabled}
+        />
+        {lowPowerDownloads?.enabled && (
+          <ToggleRow
+            label={t("settings.lowPowerDownloadsOnBattery")}
+            description={t("settings.lowPowerDownloadsOnBatteryDescription")}
+            value={!!lowPowerDownloads?.onBattery}
+            disabled={lowPowerDownloadsBatterySaving}
+            onChange={setLowPowerDownloadsOnBattery}
+          />
+        )}
         {config.usbNetworkSupported && (
           <ToggleRow
             label={t("settings.usbNetwork")}
