@@ -1,16 +1,7 @@
 import asyncio
 import logging
 
-from armada_control.calibration import (
-    begin_session,
-    controller_state,
-    end_session,
-    reset_calibration_params,
-    save_calibration,
-    start_recording,
-)
 from armada_control.config import build_config
-from armada_control.controller import set_controller_type
 from armada_control.power import save_power_config
 from armada_control.rgb import get_rgb, set_rgb
 from armada_control.steam import compat_mapped_appids, installed_games
@@ -142,9 +133,6 @@ class Plugin:
     async def restart_game_mode(self):
         return await asyncio.to_thread(restart_game_mode)
 
-    async def set_controller_type(self, value):
-        return await asyncio.to_thread(set_controller_type, value)
-
     async def get_rgb(self):
         return await asyncio.to_thread(get_rgb)
 
@@ -158,24 +146,6 @@ class Plugin:
             max_brightness,
             brightness,
         )
-
-    async def get_controller_state(self):
-        return await asyncio.to_thread(controller_state)
-
-    async def start_calibration_recording(self):
-        return await asyncio.to_thread(start_recording)
-
-    async def save_calibration(self):
-        return await asyncio.to_thread(save_calibration)
-
-    async def reset_calibration(self):
-        return await asyncio.to_thread(reset_calibration_params)
-
-    async def begin_calibration_session(self, token=None):
-        return await asyncio.to_thread(begin_session, token)
-
-    async def end_calibration_session(self, token=None):
-        return await asyncio.to_thread(end_session, token)
 
     async def get_fans_state(self):
         return await asyncio.to_thread(get_fans_state)
