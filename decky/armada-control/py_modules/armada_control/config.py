@@ -1,4 +1,3 @@
-from .controller import CONTROLLER_TYPES, controller_type, inputplumber_targets
 from .power import factory_power_defaults, parse_power
 from .rgb import rgb_supported
 from .steam import installed_games
@@ -71,8 +70,4 @@ def build_config(include_games=True):
         "desktopModes": desktop_modes(),
         "sleepMode": env.get("ARMADA_SUSPEND_MODE", "s2idle"),
         "sleepModes": sleep_modes(),
-        "controllerType": controller_type(),
-        "controllerTypes": [
-            {"data": key, "label": CONTROLLER_TYPES[key]} for key in inputplumber_targets(env)
-        ],
     }

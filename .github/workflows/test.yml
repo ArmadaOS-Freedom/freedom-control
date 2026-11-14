@@ -1,0 +1,58 @@
+---
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Control tests
+    runs-on: ubuntu-24.04
+    container: node:24-bookworm
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # node:24-bookworm carries Node but not the Python/D-Bus packages the
+      # daemon and plugin Python suites import.
+      - name: Install Python and D-Bus test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3 \
+            python3-gi \
+            gir1.2-glib-2.0 \
+            dbus
+
+      - name: Install plugin dependencies
+        working-directory: decky/armada-control
+        run: npm ci
+
+      - name: Run TypeScript tests
+        working-directory: decky/armada-control
+        run: npm test
+
+      - name: Build plugin
+        working-directory: decky/armada-control
+        run: npm run build
+
+      - name: Run plugin Python tests
+        run: python3 -m unittest discover -s decky/armada-control/tests -p 'test_*.py' -v
+
+      - name: Run SM8850 power tests
+        run: python3 tests/sm8850-power-test.py
+
+      - name: Run low-power D-Bus tests
+        run: dbus-run-session -- python3 tests/powerd-low-power-test.py
