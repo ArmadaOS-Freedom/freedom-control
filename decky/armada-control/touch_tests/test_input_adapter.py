@@ -57,14 +57,33 @@ class InputSinkTests(unittest.TestCase):
         self.sink = InputSink(self.device, self.bridge)
 
     def test_abxy_uses_linux_north_west_constants(self):
+        # A=south 304, B=east 305, X=west 308, Y=north 307 on the default
+        # layout.  This test previously pinned the swapped X/Y pair.
         self.sink.emit(
             [("button", name, True) for name in ("a", "b", "x", "y")]
         )
         self.assertEqual(
             self.device.writes,
-            [(1, 304, 1), (1, 305, 1), (1, 307, 1), (1, 308, 1)],
+            [(1, 304, 1), (1, 305, 1), (1, 308, 1), (1, 307, 1)],
         )
         self.assertEqual(self.device.syns, 1)
+
+    def test_face_buttons_write_their_own_code_on_press_and_release(self):
+        # Codes stay literal on purpose: importing the adapter's table would
+        # only restate it and keep a swapped pair green.
+        for label, code in [("a", 304), ("b", 305), ("x", 308), ("y", 307)]:
+            with self.subTest(label=label):
+                device = FakeDevice()
+                sink = InputSink(device, FakeBridge())
+
+                sink.emit([("button", label, True)])
+                self.assertEqual(device.writes, [(1, code, 1)])
+
+                sink.emit([("button", label, False)])
+                self.assertEqual(
+                    device.writes, [(1, code, 1), (1, code, 0)]
+                )
+                self.assertEqual(device.syns, 2)
 
     def test_shoulder_system_and_stick_buttons(self):
         outputs = (

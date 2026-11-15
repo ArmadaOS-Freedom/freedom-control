@@ -405,6 +405,30 @@ class FrameAccumulatorTests(unittest.TestCase):
             (EV_SYN, SYN_REPORT, 0),
         )
 
+    def press(self, slot, tracking_id):
+        """Tracking id events only, so a caller can add axes to the frame."""
+
+        return (
+            (EV_ABS, MT_SLOT, slot),
+            (EV_ABS, MT_TRACKING_ID, tracking_id),
+        )
+
+    def release(self, slot):
+        """Tracking id release events only; end lands on SYN_REPORT."""
+
+        return (
+            (EV_ABS, MT_SLOT, slot),
+            (EV_ABS, MT_TRACKING_ID, -1),
+        )
+
+    def axes(self, slot, x=None, y=None):
+        events = [(EV_ABS, MT_SLOT, slot)]
+        if x is not None:
+            events.append((EV_ABS, MT_POSITION_X, x))
+        if y is not None:
+            events.append((EV_ABS, MT_POSITION_Y, y))
+        return tuple(events)
+
     def test_begin_waits_for_syn_report_and_both_coordinates(self):
         self.assertEqual(self.feed((EV_ABS, MT_TRACKING_ID, 100)), [])
         self.assertEqual(self.feed((EV_ABS, MT_POSITION_X, 10)), [])
@@ -459,6 +483,124 @@ class FrameAccumulatorTests(unittest.TestCase):
         self.assertEqual(self.feed((EV_SYN, SYN_REPORT, 0)), [])
         self.assertEqual(
             self.feed(*self.begin(0, 9, 1, 2)),
+            [("begin", 9, 1, 2)],
+        )
+
+    def test_repress_without_axis_update_reuses_the_slot_position(self):
+        self.assertEqual(
+            self.feed(*self.begin(0, 5, 10, 11)), [("begin", 5, 10, 11)]
+        )
+        self.assertEqual(
+            self.feed(*self.release(0), (EV_SYN, SYN_REPORT, 0)),
+            [("end", 5, None, None)],
+        )
+        self.assertEqual(
+            self.feed(*self.press(0, 6), (EV_SYN, SYN_REPORT, 0)),
+            [("begin", 6, 10, 11)],
+        )
+
+    def test_repress_reporting_only_x_keeps_the_cached_y(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        self.feed(*self.release(0), (EV_SYN, SYN_REPORT, 0))
+        self.assertEqual(
+            self.feed(
+                *self.press(0, 6),
+                *self.axes(0, x=40),
+                (EV_SYN, SYN_REPORT, 0)
+            ),
+            [("begin", 6, 40, 11)],
+        )
+
+    def test_repress_reporting_only_y_keeps_the_cached_x(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        self.feed(*self.release(0), (EV_SYN, SYN_REPORT, 0))
+        self.assertEqual(
+            self.feed(
+                *self.press(0, 6),
+                *self.axes(0, y=41),
+                (EV_SYN, SYN_REPORT, 0)
+            ),
+            [("begin", 6, 10, 41)],
+        )
+
+    def test_replacing_a_tracking_id_ends_the_old_contact_first(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        self.assertEqual(
+            self.feed(
+                *self.press(0, 7),
+                *self.axes(0, x=30, y=31),
+                (EV_SYN, SYN_REPORT, 0)
+            ),
+            [("end", 5, None, None), ("begin", 7, 30, 31)],
+        )
+
+    def test_replacement_without_axis_update_inherits_the_slot_position(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        self.assertEqual(
+            self.feed(*self.press(0, 7), (EV_SYN, SYN_REPORT, 0)),
+            [("end", 5, None, None), ("begin", 7, 10, 11)],
+        )
+
+    def test_slots_keep_independent_cached_positions(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        self.feed(*self.begin(1, 6, 20, 21))
+        self.feed(*self.release(0), (EV_SYN, SYN_REPORT, 0))
+        self.feed(*self.release(1), (EV_SYN, SYN_REPORT, 0))
+        self.assertEqual(
+            self.feed(*self.press(0, 8), (EV_SYN, SYN_REPORT, 0)),
+            [("begin", 8, 10, 11)],
+        )
+        self.assertEqual(
+            self.feed(*self.press(1, 9), (EV_SYN, SYN_REPORT, 0)),
+            [("begin", 9, 20, 21)],
+        )
+
+    def test_coordinates_reported_before_the_tracking_id_are_kept(self):
+        self.assertEqual(
+            self.feed(*self.axes(0, x=25, y=26), (EV_SYN, SYN_REPORT, 0)),
+            [],
+        )
+        self.assertEqual(
+            self.feed((EV_ABS, MT_TRACKING_ID, 12), (EV_SYN, SYN_REPORT, 0)),
+            [("begin", 12, 25, 26)],
+        )
+
+    def test_release_emits_one_end_and_never_repeats(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        self.assertEqual(
+            self.feed(*self.release(0), (EV_SYN, SYN_REPORT, 0)),
+            [("end", 5, None, None)],
+        )
+        self.assertEqual(
+            self.feed(*self.release(0), (EV_SYN, SYN_REPORT, 0)), []
+        )
+        self.assertEqual(self.feed((EV_SYN, SYN_REPORT, 0)), [])
+
+    def test_released_slot_ignores_axis_updates_until_it_is_pressed(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        self.feed(*self.release(0), (EV_SYN, SYN_REPORT, 0))
+        self.assertEqual(
+            self.feed(*self.axes(0, x=50), (EV_SYN, SYN_REPORT, 0)), []
+        )
+        self.assertEqual(
+            self.feed(*self.press(0, 6), (EV_SYN, SYN_REPORT, 0)),
+            [("begin", 6, 50, 11)],
+        )
+
+    def test_syn_dropped_discards_cached_positions(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        self.feed(*self.release(0), (EV_SYN, SYN_REPORT, 0))
+        self.assertEqual(
+            self.feed((EV_SYN, SYN_DROPPED, 0)),
+            [("cancel", None, None, None)],
+        )
+        self.assertEqual(self.feed((EV_SYN, SYN_REPORT, 0)), [])
+        # The old position must not resurrect a contact for the new id.
+        self.assertEqual(
+            self.feed(*self.press(0, 9), (EV_SYN, SYN_REPORT, 0)), []
+        )
+        self.assertEqual(
+            self.feed(*self.axes(0, x=1, y=2), (EV_SYN, SYN_REPORT, 0)),
             [("begin", 9, 1, 2)],
         )
 

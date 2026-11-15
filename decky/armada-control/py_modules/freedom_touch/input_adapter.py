@@ -57,13 +57,15 @@ PAD_PRESS_CHORDS = {
     "right": "Touchpad:RightPad:Button:Press",
 }
 
-# ABXY follow the Linux constants, not the physical Deck labels: X is
-# BTN_NORTH (307) and Y is BTN_WEST (308).
+# ABXY follow the physical layout, not the Deck label order.  The evdev codes
+# name positions (BTN_SOUTH/EAST/NORTH/WEST), and InputPlumber maps them one
+# to one (evdev.rs: BTN_NORTH => North, BTN_WEST => West).  On the default
+# layout X sits on the west and Y on the north, so X is 308 and Y is 307.
 _BUTTON_CODES = {
     "a": BTN_SOUTH,
     "b": BTN_EAST,
-    "x": BTN_NORTH,
-    "y": BTN_WEST,
+    "x": BTN_WEST,
+    "y": BTN_NORTH,
     "lb": BTN_TL,
     "rb": BTN_TR,
     "back": BTN_SELECT,

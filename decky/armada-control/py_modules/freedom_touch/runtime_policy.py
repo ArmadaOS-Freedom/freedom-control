@@ -397,14 +397,22 @@ def _as_int(value):
 class FrameAccumulator:
     """Collapse raw multitouch events into begin/move/end contact events.
 
+    Type-B devices report only the axes that changed, and the kernel expects
+    the receiver to keep each slot's attributes for as long as the device
+    state lives.  Cached positions therefore live in ``_positions``,
+    independent of the active contacts in ``_contacts``: releasing a finger
+    only drops its contact, so a later press on the same slot starts from
+    the last reported coordinates even without fresh axis events.
+
     Events are emitted only on SYN_REPORT.  SYN_DROPPED immediately emits a
-    single cancel and discards all state; every event until the following
-    SYN_REPORT is ignored so a partially dropped frame cannot create ghost
-    contacts.
+    single cancel and discards all state, cached positions included; every
+    event until the following SYN_REPORT is ignored so a partially dropped
+    frame cannot create ghost contacts.
     """
 
     def __init__(self):
-        self._slots = {}
+        self._positions = {}
+        self._contacts = {}
         self._slot = 0
         self._ends = []
         self._dropped = False
@@ -446,62 +454,67 @@ class FrameAccumulator:
         return []
 
     def _start(self, slot, tracking_id):
-        state = self._slots.get(slot)
-        if state is not None:
-            if state["tid"] == tracking_id:
+        contact = self._contacts.get(slot)
+        if contact is not None:
+            if contact["tid"] == tracking_id:
                 return
-            if state["begun"]:
-                self._ends.append(("end", state["tid"], None, None))
-        # A replacement starts with unknown coordinates so the new contact
-        # cannot inherit the previous one's position.
-        self._slots[slot] = {
+            if contact["begun"]:
+                self._ends.append(("end", contact["tid"], None, None))
+        # The new contact inherits the slot's cached position so a press
+        # without fresh axis events still begins where the slot was left.
+        self._contacts[slot] = {
             "tid": tracking_id,
-            "x": None,
-            "y": None,
             "begun": False,
             "changed": False,
         }
 
     def _release(self, slot):
-        state = self._slots.pop(slot, None)
-        if state is None:
+        contact = self._contacts.pop(slot, None)
+        if contact is None:
             return
-        if state["begun"]:
-            self._ends.append(("end", state["tid"], None, None))
+        if contact["begun"]:
+            self._ends.append(("end", contact["tid"], None, None))
 
     def _position(self, slot, axis, value):
         number = _as_int(value)
         if number is None:
             return
-        state = self._slots.get(slot)
-        if state is None:
+        position = self._positions.get(slot)
+        if position is None:
+            position = {"x": None, "y": None}
+            self._positions[slot] = position
+        if position[axis] == number:
             return
-        if state[axis] == number:
-            return
-        state[axis] = number
-        state["changed"] = True
+        position[axis] = number
+        contact = self._contacts.get(slot)
+        if contact is not None:
+            contact["changed"] = True
 
     def _flush(self):
         events = self._ends
         self._ends = []
 
-        for state in self._slots.values():
-            x = state["x"]
-            y = state["y"]
+        for slot, contact in self._contacts.items():
+            position = self._positions.get(slot)
+            if position is None:
+                continue
+            x = position["x"]
+            y = position["y"]
             if x is None or y is None:
                 continue
-            if not state["begun"]:
-                events.append(("begin", state["tid"], x, y))
-                state["begun"] = True
-                state["changed"] = False
-            elif state["changed"]:
-                events.append(("move", state["tid"], x, y))
-                state["changed"] = False
+            if not contact["begun"]:
+                events.append(("begin", contact["tid"], x, y))
+                contact["begun"] = True
+                contact["changed"] = False
+            elif contact["changed"]:
+                events.append(("move", contact["tid"], x, y))
+                contact["changed"] = False
 
         return events
 
     def _cancel(self):
-        self._slots.clear()
+        self._positions.clear()
+        self._contacts.clear()
         self._ends = []
         self._slot = 0
         self._dropped = True
