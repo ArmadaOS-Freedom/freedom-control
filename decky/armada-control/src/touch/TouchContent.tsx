@@ -95,9 +95,11 @@ export function TouchContent({ locale }: { locale: Language }) {
   const confirmedRef = useRef<PluginState | null>(null);
   const busyRef = useRef(false);
   const previewingRef = useRef(false);
-  const pendingOptionsRef = useRef<OptionsPatch | null>(null);
+  // Every accepted mutation counts here until it is acknowledged, including
+  // the ones still waiting in the shared api queue.
+  const outstandingRef = useRef(0);
   // The tab switch unmounts this page; work awaited by the old instance must
-  // never publish state or send another patch afterwards.
+  // never publish state afterwards. Accepted mutations still run to the end.
   const aliveRef = useRef(true);
   // Every write that owns settings/status bumps this counter, so a poll can
   // tell whether a write started after its own request went out.
@@ -156,66 +158,65 @@ export function TouchContent({ locale }: { locale: Language }) {
     return () => {
       disposed = true;
       aliveRef.current = false;
-      pendingOptionsRef.current = null;
       window.clearInterval(timer);
     };
   }, []);
 
-  const runOptions = async (patch: OptionsPatch) => {
-    if (!aliveRef.current) {
-      return;
-    }
+  const beginWrite = () => {
+    outstandingRef.current += 1;
     if (busyRef.current) {
-      pendingOptionsRef.current = {
-        ...(pendingOptionsRef.current ?? {}),
-        ...patch,
-      };
       return;
     }
-
-    writeGenerationRef.current += 1;
     busyRef.current = true;
-    setBusy(true);
-    setActionError(null);
+    if (aliveRef.current) {
+      setBusy(true);
+    }
+  };
 
-    let currentPatch: OptionsPatch | null = patch;
+  const endWrite = () => {
+    outstandingRef.current = Math.max(0, outstandingRef.current - 1);
+    if (outstandingRef.current > 0 || !busyRef.current) {
+      return;
+    }
+    busyRef.current = false;
+    if (aliveRef.current) {
+      setBusy(false);
+    }
+  };
+
+  const runMutation = async (
+    operation: () => Promise<PluginState>,
+    describeFailure: (error: unknown) => string,
+  ) => {
+    const generation = writeGenerationRef.current + 1;
+    writeGenerationRef.current = generation;
+    beginWrite();
+    if (aliveRef.current) {
+      setActionError(null);
+    }
     try {
-      while (currentPatch) {
-        const next = await updateOptions(currentPatch);
-        if (!aliveRef.current) {
-          return;
-        }
-        const queued = pendingOptionsRef.current;
-        pendingOptionsRef.current = null;
-        if (queued) {
-          // Do not publish the older response over the queued optimistic
-          // value; send the newest patch first, then adopt its state.
-          currentPatch = queued;
-          continue;
-        }
-        adopt(next);
-        currentPatch = null;
+      const next = await operation();
+      // Every acknowledgement is the newest truth for rollback, but only the
+      // newest action may publish it: an older response would rewind the
+      // optimistic value that a later action already shows.
+      confirmedRef.current = next;
+      if (aliveRef.current && writeGenerationRef.current === generation) {
+        stateRef.current = next;
+        setState(next);
       }
     } catch (error) {
       if (aliveRef.current) {
-        pendingOptionsRef.current = null;
-        const confirmed = confirmedRef.current;
-        if (confirmed) {
-          stateRef.current = confirmed;
-          setState(confirmed);
+        if (writeGenerationRef.current === generation) {
+          const confirmed = confirmedRef.current;
+          if (confirmed) {
+            stateRef.current = confirmed;
+            setState(confirmed);
+          }
         }
-        setActionError(text("error.save", { error: describeError(error) }));
+        setActionError(describeFailure(error));
       }
     } finally {
-      if (aliveRef.current) {
-        busyRef.current = false;
-        setBusy(false);
-        const queued = pendingOptionsRef.current;
-        if (queued) {
-          pendingOptionsRef.current = null;
-          void runOptions(queued);
-        }
-      }
+      endWrite();
     }
   };
 
@@ -224,8 +225,8 @@ export function TouchContent({ locale }: { locale: Language }) {
     if (!current) {
       return;
     }
-    // Slider drags must stay responsive while one update_options request is
-    // in flight; the queue keeps at most one newest patch.
+    // Slider drags must stay responsive; the shared api queue merges the
+    // readings that arrive before the write reaches the backend.
     const next: PluginState = {
       ...current,
       settings: { ...current.settings, ...patch },
@@ -233,74 +234,33 @@ export function TouchContent({ locale }: { locale: Language }) {
     stateRef.current = next;
     setState(next);
     setActionError(null);
-    void runOptions(patch);
+    void runMutation(
+      () => updateOptions(patch),
+      (error) => text("error.save", { error: describeError(error) }),
+    );
   };
 
-  const choosePreset = async (presetId: string) => {
-    if (!aliveRef.current || busyRef.current) {
+  const choosePreset = (presetId: string) => {
+    if (!aliveRef.current) {
       return;
     }
     if (stateRef.current?.settings.active_preset_id === presetId) {
       return;
     }
-
-    writeGenerationRef.current += 1;
-    busyRef.current = true;
-    setBusy(true);
-    setActionError(null);
-    try {
-      const next = await selectPreset(presetId);
-      if (!aliveRef.current) {
-        return;
-      }
-      adopt(next);
-    } catch (error) {
-      if (aliveRef.current) {
-        setActionError(text("error.preset", { error: describeError(error) }));
-      }
-    } finally {
-      if (aliveRef.current) {
-        busyRef.current = false;
-        setBusy(false);
-        const queued = pendingOptionsRef.current;
-        if (queued) {
-          pendingOptionsRef.current = null;
-          void runOptions(queued);
-        }
-      }
-    }
+    void runMutation(
+      () => selectPreset(presetId),
+      (error) => text("error.preset", { error: describeError(error) }),
+    );
   };
 
-  const toggleControlsVisible = async (visible: boolean) => {
-    if (!aliveRef.current || !stateRef.current || busyRef.current) {
+  const toggleControlsVisible = (visible: boolean) => {
+    if (!aliveRef.current || !stateRef.current) {
       return;
     }
-
-    writeGenerationRef.current += 1;
-    busyRef.current = true;
-    setBusy(true);
-    setActionError(null);
-    try {
-      const next = await setControlsVisible(visible);
-      if (!aliveRef.current) {
-        return;
-      }
-      adopt(next);
-    } catch (error) {
-      if (aliveRef.current) {
-        setActionError(text("error.visibility", { error: describeError(error) }));
-      }
-    } finally {
-      if (aliveRef.current) {
-        busyRef.current = false;
-        setBusy(false);
-        const queued = pendingOptionsRef.current;
-        if (queued) {
-          pendingOptionsRef.current = null;
-          void runOptions(queued);
-        }
-      }
-    }
+    void runMutation(
+      () => setControlsVisible(visible),
+      (error) => text("error.visibility", { error: describeError(error) }),
+    );
   };
 
   const tryHaptics = async () => {
@@ -397,7 +357,7 @@ export function TouchContent({ locale }: { locale: Language }) {
                   state.status.controls_visible === undefined ||
                   busy
                 }
-                onChange={(value) => void toggleControlsVisible(value)}
+                onChange={(value) => toggleControlsVisible(value)}
               />
             </PanelSectionRow>
             <PanelSectionRow>
@@ -522,7 +482,7 @@ export function TouchContent({ locale }: { locale: Language }) {
               <PanelSectionRow key={preset.id}>
                 <ButtonItem
                   layout="below"
-                  onClick={() => void choosePreset(preset.id)}
+                  onClick={() => choosePreset(preset.id)}
                 >
                   <span style={presetRowStyle}>
                     <span

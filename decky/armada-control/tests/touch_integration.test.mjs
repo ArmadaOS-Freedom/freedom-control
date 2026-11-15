@@ -1,10 +1,12 @@
 // Controller <-> Touch page integration checks. Everything runs real code: the
-// touch api module is loaded against a recording @decky/api stub, the touch
-// dictionaries and decision helpers are transpiled from source, the plugin
-// lifecycle is executed against stubbed router/Router/window globals, and the
-// exported Content and TouchContent components are rendered against a minimal
-// React hook shim, so tab order, lazy mounting, the global heartbeat and the
-// page controls are read from the returned element tree, not from source text.
+// touch api module is loaded against a recording @decky/api stub, its shared
+// mutation queue is exercised directly and again behind the shipped page, the
+// touch dictionaries and decision helpers are transpiled from source, the
+// plugin lifecycle is executed against stubbed router/Router/window globals,
+// and the exported Content and TouchContent components are rendered against a
+// minimal React hook shim, so tab order, lazy mounting, the global heartbeat
+// and the page controls are read from the returned element tree, not from
+// source text.
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -107,6 +109,122 @@ const transportClosed = new Error("RPC transport closed");
 globalThis.__touchOutcome = () => Promise.reject(transportClosed);
 await assert.rejects(touchApi.fetchState(), (error) => error === transportClosed);
 await assert.rejects(touchApi.sendHeartbeat(null), (error) => error === transportClosed);
+
+// ---------------------------------------------------------------------------
+// Shared mutation queue: accepted work survives its page, in call order
+// ---------------------------------------------------------------------------
+
+const queueCalls = [];
+const queuePending = [];
+globalThis.__queueCalls = queueCalls;
+globalThis.__queueDispatch = (name, args) =>
+  new Promise((resolve, reject) => {
+    queuePending.push({ name, args, resolve, reject });
+  });
+const queueApiStubUrl = toModuleUrl(`
+  export const callable = (name) => (...args) => {
+    globalThis.__queueCalls.push([name, ...args]);
+    return globalThis.__queueDispatch(name, args);
+  };
+`);
+const queueApi = await import(toModuleUrl(
+  (await readSource("../src/touch/api.ts")).replace(
+    /from ["']@decky\/api["']/,
+    `from "${queueApiStubUrl}"`,
+  ),
+  "touch-queue-api.ts",
+));
+
+const queueResponse = (tag) => ({ tag, settings: {}, status: {}, presets: [] });
+const takePending = (name) => {
+  const index = queuePending.findIndex((entry) => entry.name === name);
+  assert.ok(index >= 0, `the ${name} call is in flight`);
+  return queuePending.splice(index, 1)[0];
+};
+
+// Patches accepted before the batch reaches the wire share one write, and all
+// of their callers receive that write's response.
+const mergedA = queueApi.updateOptions({ opacity: 0.2 });
+const mergedB = queueApi.updateOptions({ opacity: 0.3 });
+const mergedC = queueApi.updateOptions({ opacity: 0.3, scale: 1.1 });
+await settle();
+assert.deepEqual(
+  queueCalls,
+  [["update_touch_options", { opacity: 0.3, scale: 1.1 }]],
+  "adjacent patches are merged into the slot the first action took",
+);
+const mergedAnswer = queueResponse("merged");
+queuePending.shift().resolve(mergedAnswer);
+await settle();
+for (const caller of [mergedA, mergedB, mergedC]) {
+  assert.equal(await caller, mergedAnswer, "every merged caller sees the same response");
+}
+
+// A snapshot read never overtakes a mutation accepted before it.
+const callsBeforeRead = queueCalls.length;
+const waitingWrite = queueApi.updateOptions({ deadzone: 0.2 });
+await settle();
+const waitingRead = queueApi.fetchState();
+await settle();
+assert.deepEqual(queueCalls.slice(-1), [["update_touch_options", { deadzone: 0.2 }]]);
+assert.equal(queueCalls.length, callsBeforeRead + 1, "the read waits for the accepted write");
+queuePending.shift().resolve(queueResponse("write"));
+await settle();
+assert.deepEqual(queueCalls.at(-1), ["get_touch_state"], "the read runs once the write finished");
+const readAnswer = queueResponse("read");
+queuePending.shift().resolve(readAnswer);
+assert.equal(await waitingRead, readAnswer);
+await waitingWrite;
+
+// A failed mutation rejects only itself; the queue keeps running.
+const rejectedWrite = queueApi.updateOptions({ opacity: 0.1 });
+const rejectedCheck = assert.rejects(rejectedWrite, (error) => error === transportClosed);
+await settle();
+queuePending.shift().reject(transportClosed);
+await rejectedCheck;
+const writeAfterFailure = queueApi.setSettings({ version: 2 });
+await settle();
+assert.deepEqual(queueCalls.at(-1), ["set_touch_settings", { version: 2 }], "the next write still runs");
+const settingsAnswer = queueResponse("settings");
+queuePending.shift().resolve(settingsAnswer);
+assert.equal(await writeAfterFailure, settingsAnswer);
+
+// A layout mutation is a merge barrier: a patch made after it must not join
+// the earlier slot and overtake it.
+const callsBeforeBarrier = queueCalls.length;
+const beforeBarrier = queueApi.updateOptions({ opacity: 0.4 });
+await settle();
+const barrierReset = queueApi.resetLayout();
+const afterBarrier = queueApi.updateOptions({ opacity: 0.5 });
+await settle();
+assert.equal(queueCalls.length, callsBeforeBarrier + 1, "only the first write reached the wire");
+queuePending.shift().resolve(queueResponse("first"));
+await settle();
+assert.deepEqual(queueCalls.at(-1), ["reset_touch_layout"], "the layout mutation keeps its place");
+queuePending.shift().resolve(queueResponse("reset"));
+await settle();
+assert.deepEqual(
+  queueCalls.at(-1),
+  ["update_touch_options", { opacity: 0.5 }],
+  "the later patch takes its own slot instead of merging backwards",
+);
+queuePending.shift().resolve(queueResponse("second"));
+await settle();
+await Promise.all([beforeBarrier, barrierReset, afterBarrier]);
+assert.equal(queuePending.length, 0, "the barrier case left nothing in flight");
+
+// The heartbeat and the haptics preview never wait behind a mutation.
+const slowWrite = queueApi.updateOptions({ opacity: 0.9 });
+await settle();
+const heartbeat = queueApi.sendHeartbeat("42");
+await settle();
+assert.deepEqual(queueCalls.at(-1), ["touch_heartbeat", "42"]);
+const heartbeatAnswer = queueResponse("heartbeat");
+takePending("touch_heartbeat").resolve(heartbeatAnswer);
+assert.equal(await heartbeat, heartbeatAnswer);
+takePending("update_touch_options").resolve(queueResponse("slow"));
+await slowWrite;
+assert.equal(queuePending.length, 0, "the api queue is idle again");
 
 // ---------------------------------------------------------------------------
 // Global lifecycle: route registration and the 1 Hz heartbeat
@@ -514,15 +632,26 @@ export const PanelSectionRow = "PanelSectionRow";
 export const SliderField = "SliderField";
 export const ToggleField = "ToggleField";`;
 
-const pageApiStub = `export const fetchState = () => globalThis.__touchPage.fetchState();
-export const previewHaptics = () => globalThis.__touchPage.previewHaptics();
-export const selectPreset = (id) => globalThis.__touchPage.selectPreset(id);
-export const sendHeartbeat = (appid) => {
-  globalThis.__touchPage.heartbeats.push(appid);
-  return Promise.resolve({});
-};
-export const setControlsVisible = (visible) => globalThis.__touchPage.setControlsVisible(visible);
-export const updateOptions = (patch) => globalThis.__touchPage.updateOptions(patch);`;
+// The page talks to the shipped api module, only its transport is recorded, so
+// the ordering and merging under test are the real queue's, not a stub's.
+const pageCallableStubUrl = toModuleUrl(`
+  export const callable = (name) => (...args) => globalThis.__touchPage.rpc(name, args);
+`);
+const pageTouchApiUrl = toModuleUrl(
+  (await readSource("../src/touch/api.ts")).replace(
+    /from ["']@decky\/api["']/,
+    `from "${pageCallableStubUrl}"`,
+  ),
+  "page-touch-api.ts",
+);
+const pageApiStub = `export {
+  fetchState,
+  previewHaptics,
+  selectPreset,
+  sendHeartbeat,
+  setControlsVisible,
+  updateOptions,
+} from "${pageTouchApiUrl}";`;
 
 const pageTouchI18nUrl = toModuleUrl(
   (await readSource("../src/touch/touch_i18n.ts")).replace(
@@ -586,37 +715,115 @@ const pageState = {
   ],
 };
 
-const pageCalls = { fetches: 0, updates: [], presets: [], previews: 0, visible: [], heartbeats: [], navigations: [] };
-let resolveUpdate;
-globalThis.__touchPage = {
-  fetchState: () => {
+const clonePageState = (source) => ({
+  settings: { ...source.settings },
+  status: { ...source.status },
+  presets: source.presets.map((preset) => ({ ...preset })),
+});
+
+let livePageState = clonePageState(pageState);
+const pageCalls = {
+  fetches: 0,
+  updates: [],
+  presets: [],
+  previews: 0,
+  visible: [],
+  heartbeats: [],
+  navigations: [],
+};
+const pendingUpdates = [];
+const issuedPatches = [];
+let deferNextFetch = false;
+const deferredFetches = [];
+
+// The backend model: a write only changes the live snapshot when the test
+// acknowledges it, so a deferred answer really is older than a later one.
+const pageHandlers = {
+  get_touch_state: () => {
     pageCalls.fetches += 1;
-    return Promise.resolve(pageState);
+    if (deferNextFetch) {
+      deferNextFetch = false;
+      return new Promise((resolve) => deferredFetches.push(resolve));
+    }
+    return Promise.resolve(clonePageState(livePageState));
   },
-  updateOptions: (patch) => {
+  update_touch_options: (patch) => {
     pageCalls.updates.push(patch);
-    return new Promise((resolve) => {
-      resolveUpdate = resolve;
-    });
+    issuedPatches.push(patch);
+    return new Promise((resolve, reject) => pendingUpdates.push({ patch, resolve, reject }));
   },
-  selectPreset: (id) => {
+  select_touch_preset: (id) => {
     pageCalls.presets.push(id);
-    return Promise.resolve({
-      ...pageState,
-      settings: { ...pageState.settings, active_preset_id: id },
-    });
+    livePageState = {
+      ...livePageState,
+      settings: { ...livePageState.settings, active_preset_id: id },
+    };
+    return Promise.resolve(clonePageState(livePageState));
   },
-  previewHaptics: () => {
+  set_touch_controls_visible: (visible) => {
+    pageCalls.visible.push(visible);
+    livePageState = {
+      ...livePageState,
+      status: { ...livePageState.status, controls_visible: visible },
+    };
+    return Promise.resolve(clonePageState(livePageState));
+  },
+  touch_heartbeat: (appid) => {
+    pageCalls.heartbeats.push(appid);
+    return Promise.resolve({});
+  },
+  preview_touch_haptics: () => {
     pageCalls.previews += 1;
     return Promise.resolve({ queued: true });
   },
-  setControlsVisible: (visible) => {
-    pageCalls.visible.push(visible);
-    return Promise.resolve({ ...pageState, status: { ...pageState.status, controls_visible: visible } });
+};
+
+globalThis.__touchPage = {
+  rpc: (name, args) => {
+    const handler = pageHandlers[name];
+    if (!handler) {
+      throw new Error(`unexpected touch RPC from the page: ${name}`);
+    }
+    return handler(...args);
   },
   heartbeats: pageCalls.heartbeats,
   navigations: pageCalls.navigations,
   closedMenus: 0,
+};
+
+const withSettings = (patch) => {
+  livePageState = {
+    ...livePageState,
+    settings: { ...livePageState.settings, ...patch },
+  };
+  return clonePageState(livePageState);
+};
+
+const completeUpdate = async (entry, { fail = false, response } = {}) => {
+  const index = pendingUpdates.indexOf(entry);
+  assert.ok(index >= 0, "the expected write is in flight");
+  pendingUpdates.splice(index, 1);
+  if (fail) {
+    entry.reject(new Error("backend rejected the write"));
+  } else {
+    entry.resolve(response ?? withSettings(entry.patch));
+  }
+  await settle();
+};
+
+const resetPageFixtures = () => {
+  assert.equal(pendingUpdates.length, 0, "the previous case left no write in flight");
+  livePageState = clonePageState(pageState);
+  pageCalls.updates.length = 0;
+  pageCalls.presets.length = 0;
+  pageCalls.visible.length = 0;
+  pageCalls.fetches = 0;
+  pageCalls.previews = 0;
+  pageCalls.heartbeats.length = 0;
+  pageCalls.navigations.length = 0;
+  issuedPatches.length = 0;
+  deferredFetches.length = 0;
+  deferNextFetch = false;
 };
 
 const mountPage = (locale = "en") => {
@@ -705,9 +912,18 @@ const pageSlider = (tree, label) =>
 const pagePanelTitles = (tree) =>
   findAll(tree, (node) => node.type === "PanelSection").map((node) => node.props.title);
 
+const mountPollingPage = async (locale = "en") => {
+  const before = new Set(timers.intervals.keys());
+  const runtime = mountPage(locale);
+  const added = [...timers.intervals.keys()].filter((id) => !before.has(id));
+  assert.equal(added.length, 1, "a mounted page owns exactly one poll timer");
+  await settle();
+  return { runtime, poll: timers.intervals.get(added[0]).callback };
+};
+
 const page = mountPage("en");
-assert.equal(pageCalls.fetches, 1, "mounting the page reads the state once");
 await settle();
+assert.equal(pageCalls.fetches, 1, "mounting the page reads the state once");
 
 // One page, one column: the touch tree holds no nested tab strip of its own,
 // so the Controller's outer tabs stay the only navigation on screen.
@@ -774,17 +990,23 @@ pageToggle(page.tree, touch("en", "common.enable")).props.onChange(false);
 await settle();
 assert.deepEqual(pageCalls.updates, [{ enabled: false }]);
 assert.equal(pageToggle(page.tree, touch("en", "common.enable")).props.checked, false);
-resolveUpdate({ ...pageState, settings: { ...pageState.settings, enabled: false } });
-await settle();
+await completeUpdate(pendingUpdates[0]);
 assert.equal(pageToggle(page.tree, touch("en", "common.enable")).props.checked, false);
 
+// Turning it back on is another accepted write, not a local patch.
+pageToggle(page.tree, touch("en", "common.enable")).props.onChange(true);
+await settle();
+await completeUpdate(pendingUpdates[0]);
+assert.equal(livePageState.settings.enabled, true);
+
 // Choosing a preset writes only the preset id and keeps every section mounted.
+const updatesBeforePreset = pageCalls.updates.length;
 pageButton(page.tree, "Mine").props.onClick();
 await settle();
 assert.deepEqual(pageCalls.presets, ["custom-1"]);
 assert.equal(propStrings(page.tree).includes(touch("en", "status.state", { value: "capturing" })), true);
 assert.equal(findAll(page.tree, (node) => node.type === "PanelSection").length, 4);
-assert.equal(pageCalls.updates.length, 1, "preset choice does not re-send option patches");
+assert.equal(pageCalls.updates.length, updatesBeforePreset, "preset choice does not re-send option patches");
 
 // Opening the editor releases capture before the route change.
 pageButton(page.tree, touch("en", "layout.openEditor")).props.onClick();
@@ -832,96 +1054,50 @@ assert.ok(timers.intervals.size < intervalsBeforeUnmount, "unmounting clears the
 editorState.endLayoutEditing();
 
 // ---------------------------------------------------------------------------
-// Touch page: a deferred poll and a tab remount never publish older work
+// Touch page: accepted work outlives the page and keeps its order
 // ---------------------------------------------------------------------------
 
-const clonePageState = (source) => ({
-  settings: { ...source.settings },
-  status: { ...source.status },
-  presets: source.presets.map((preset) => ({ ...preset })),
-});
+// --- Regression: a queued disable must not die with the page ----------------
 
-let livePageState = clonePageState(pageState);
-let deferNextFetch = false;
-const deferredFetches = [];
-const pendingUpdates = [];
-const issuedPatches = [];
+// The opacity save is still on the wire when the enable toggle is turned off
+// and the page unmounts. That disable was already accepted, so it must still
+// reach the backend instead of being dropped with the local pending state.
+resetPageFixtures();
+const droppedPage = await mountPollingPage();
+const droppedSlider = () => pageSlider(droppedPage.runtime.tree, touch("en", "common.opacity"));
+const droppedEnable = () => pageToggle(droppedPage.runtime.tree, touch("en", "common.enable"));
+droppedSlider().props.onChange(0.4);
+await settle();
+assert.deepEqual(issuedPatches, [{ opacity: 0.4 }], "the slider save owns the backend");
+droppedEnable().props.onChange(false);
+await settle();
+assert.equal(droppedEnable().props.checked, false, "the disable is shown immediately");
+assert.deepEqual(issuedPatches, [{ opacity: 0.4 }], "the disable waits behind the accepted save");
+droppedPage.runtime.unmount();
+const droppedRenders = droppedPage.runtime.renders;
+await completeUpdate(pendingUpdates[0]);
+assert.deepEqual(
+  issuedPatches,
+  [{ opacity: 0.4 }, { enabled: false }],
+  "unmounting the page does not cancel the accepted disable",
+);
+await completeUpdate(pendingUpdates[0]);
+assert.equal(livePageState.settings.enabled, false, "the backend ends up disabled");
+assert.equal(livePageState.settings.opacity, 0.4);
+assert.equal(droppedPage.runtime.renders, droppedRenders, "the detached page never re-renders");
 
-// The backend is modelled as one live snapshot: a write only changes it when
-// the test resolves that write, so a deferred response really is older.
-globalThis.__touchPage.fetchState = () => {
-  pageCalls.fetches += 1;
-  if (deferNextFetch) {
-    deferNextFetch = false;
-    return new Promise((resolve) => deferredFetches.push(resolve));
-  }
-  return Promise.resolve(clonePageState(livePageState));
-};
-globalThis.__touchPage.updateOptions = (patch) => {
-  pageCalls.updates.push(patch);
-  issuedPatches.push(patch);
-  return new Promise((resolve, reject) => pendingUpdates.push({ patch, resolve, reject }));
-};
-globalThis.__touchPage.selectPreset = (id) => {
-  pageCalls.presets.push(id);
-  livePageState = {
-    ...livePageState,
-    settings: { ...livePageState.settings, active_preset_id: id },
-  };
-  return Promise.resolve(clonePageState(livePageState));
-};
-globalThis.__touchPage.setControlsVisible = (visible) => {
-  pageCalls.visible.push(visible);
-  livePageState = {
-    ...livePageState,
-    status: { ...livePageState.status, controls_visible: visible },
-  };
-  return Promise.resolve(clonePageState(livePageState));
-};
-
-const resetPageFixtures = () => {
-  livePageState = clonePageState(pageState);
-  pageCalls.updates.length = 0;
-  pageCalls.presets.length = 0;
-  pageCalls.visible.length = 0;
-  pageCalls.fetches = 0;
-  pageCalls.previews = 0;
-  pageCalls.heartbeats.length = 0;
-  pageCalls.navigations.length = 0;
-  deferredFetches.length = 0;
-  pendingUpdates.length = 0;
-  issuedPatches.length = 0;
-  deferNextFetch = false;
-};
-
-const withSettings = (patch) => {
-  livePageState = {
-    ...livePageState,
-    settings: { ...livePageState.settings, ...patch },
-  };
-  return clonePageState(livePageState);
-};
-
-const completeUpdate = async (entry, response, { fail = false } = {}) => {
-  const index = pendingUpdates.indexOf(entry);
-  assert.ok(index >= 0, "the expected write is in flight");
-  pendingUpdates.splice(index, 1);
-  if (fail) {
-    entry.reject(new Error("backend rejected the write"));
-  } else {
-    entry.resolve(response);
-  }
-  await settle();
-};
-
-const mountPollingPage = async (locale = "en") => {
-  const before = new Set(timers.intervals.keys());
-  const runtime = mountPage(locale);
-  const added = [...timers.intervals.keys()].filter((id) => !before.has(id));
-  assert.equal(added.length, 1, "a mounted page owns exactly one poll timer");
-  await settle();
-  return { runtime, poll: timers.intervals.get(added[0]).callback };
-};
+// The next mount reads the finished writes, so it opens on the disable.
+const afterDropped = await mountPollingPage();
+assert.equal(
+  pageToggle(afterDropped.runtime.tree, touch("en", "common.enable")).props.checked,
+  false,
+  "the remount keeps the disable the old page accepted",
+);
+assert.equal(
+  pageSlider(afterDropped.runtime.tree, touch("en", "common.opacity")).props.value,
+  0.4,
+);
+afterDropped.runtime.unmount();
 
 // A poll that goes out before a write and lands after it must not roll the
 // display or the confirmed snapshot back to the older value it carried.
@@ -942,7 +1118,7 @@ polledOpacity().props.onChange(0.4);
 await settle();
 assert.deepEqual(pageCalls.updates, [{ opacity: 0.4 }], "the slider move is written once");
 assert.equal(polledOpacity().props.value, 0.4, "the slider stays optimistic while that write is in flight");
-await completeUpdate(pendingUpdates[0], withSettings({ opacity: 0.4 }));
+await completeUpdate(pendingUpdates[0]);
 assert.equal(polledOpacity().props.value, 0.4, "the completed write stays on screen");
 
 const staleSnapshot = clonePageState(livePageState);
@@ -962,7 +1138,7 @@ assert.equal(
 polledOpacity().props.onChange(0.7);
 await settle();
 assert.equal(polledOpacity().props.value, 0.7);
-await completeUpdate(pendingUpdates[0], undefined, { fail: true });
+await completeUpdate(pendingUpdates[0], { fail: true });
 assert.equal(
   polledOpacity().props.value,
   0.4,
@@ -974,65 +1150,48 @@ assert.ok(
 );
 polledPage.runtime.unmount();
 
-// A tab switch unmounts the page. A write and the slider move queued behind it
-// belong to that instance: once a fresh page has saved a newer value, the old
-// response may neither publish state nor dispatch the queued patch.
+// A tab switch keeps the accepted writes as well: the fresh page waits for
+// them, reads the value they produced, and the detached tree stays frozen.
 resetPageFixtures();
 const oldPage = await mountPollingPage();
 const oldOpacity = () => pageSlider(oldPage.runtime.tree, touch("en", "common.opacity"));
 oldOpacity().props.onChange(0.3);
 await settle();
-assert.deepEqual(pageCalls.updates, [{ opacity: 0.3 }]);
 oldOpacity().props.onChange(0.35);
 await settle();
-assert.equal(pageCalls.updates.length, 1, "the slider move waits in the local queue");
+assert.deepEqual(issuedPatches, [{ opacity: 0.3 }], "one accepted write is on the wire");
 assert.equal(oldOpacity().props.value, 0.35, "the queued value is shown optimistically");
 assert.equal(pendingUpdates.length, 1);
 
-const staleWrite = pendingUpdates[0];
+const oldRenders = oldPage.runtime.renders;
 oldPage.runtime.unmount();
-const rendersAtUnmount = oldPage.runtime.renders;
 
 const newPage = await mountPollingPage();
 const newOpacity = () => pageSlider(newPage.runtime.tree, touch("en", "common.opacity"));
-assert.equal(
-  newOpacity().props.value,
-  0.9,
-  "the fresh page reads the backend, not the detached optimistic value",
-);
+assert.equal(newOpacity(), undefined, "the fresh page shows nothing until the accepted writes finish");
+await completeUpdate(pendingUpdates[0]);
+assert.equal(pageCalls.fetches, 1, "the read still waits for the queued write");
+await completeUpdate(pendingUpdates[0]);
+assert.equal(pageCalls.fetches, 2, "the read runs once every accepted write finished");
+assert.equal(newOpacity().props.value, 0.35, "the fresh page reads what the old page saved");
 
 newOpacity().props.onChange(0.6);
 await settle();
-assert.deepEqual(pageCalls.updates, [{ opacity: 0.3 }, { opacity: 0.6 }]);
-const freshWrite = pendingUpdates.find((entry) => entry !== staleWrite);
-assert.ok(freshWrite, "the newer page wrote its own value");
-await completeUpdate(freshWrite, withSettings({ opacity: 0.6 }));
-assert.equal(newOpacity().props.value, 0.6);
-
-const staleResponse = clonePageState(livePageState);
-staleResponse.settings.opacity = 0.3;
-await completeUpdate(staleWrite, staleResponse);
 assert.deepEqual(
-  pageCalls.updates,
-  [{ opacity: 0.3 }, { opacity: 0.6 }],
-  "the detached page never dispatches its queued patch",
+  issuedPatches,
+  [{ opacity: 0.3 }, { opacity: 0.35 }, { opacity: 0.6 }],
+  "accepted operations keep their order across the remount",
 );
-assert.equal(newOpacity().props.value, 0.6, "the newer page keeps its own setting");
-assert.equal(
-  oldOpacity().props.value,
-  0.35,
-  "the detached page never adopts the late response",
-);
-assert.equal(
-  oldPage.runtime.renders,
-  rendersAtUnmount,
-  "a late resolution never renders the detached page",
-);
+await completeUpdate(pendingUpdates[0]);
+assert.equal(newOpacity().props.value, 0.6);
+assert.equal(livePageState.settings.opacity, 0.6, "the newest accepted write is the last word");
+assert.equal(oldOpacity().props.value, 0.35, "the detached page keeps the tree it last rendered");
+assert.equal(oldPage.runtime.renders, oldRenders, "a late resolution never renders the detached page");
 assert.equal(pendingUpdates.length, 0);
 newPage.runtime.unmount();
 
-// The active page still merges slider moves, recovers from a rejected write,
-// selects a preset and hides the overlay.
+// The active page merges slider readings, recovers from a rejected write, and
+// keeps a preset from being overtaken by a patch made after it.
 resetPageFixtures();
 const workingPage = await mountPollingPage();
 const workingSlider = (key) => pageSlider(workingPage.runtime.tree, touch("en", key));
@@ -1045,27 +1204,27 @@ await settle();
 workingSlider("common.opacity").props.onChange(0.6);
 await settle();
 assert.deepEqual(issuedPatches, [{ opacity: 0.5 }], "one write owns the backend while the slider moves");
-assert.equal(pendingUpdates.length, 1, "the queue keeps at most one newest patch");
-assert.equal(workingSlider("common.opacity").props.value, 0.6);
+assert.equal(workingSlider("common.opacity").props.value, 0.6, "the newest reading stays on screen");
 
-await completeUpdate(pendingUpdates[0], withSettings({ opacity: 0.5 }));
+await completeUpdate(pendingUpdates[0]);
 assert.deepEqual(
   issuedPatches,
   [{ opacity: 0.5 }, { opacity: 0.6 }],
-  "the queued patch is sent once the first response lands",
+  "the pending readings are merged into one follow-up write",
 );
 assert.equal(
   workingSlider("common.opacity").props.value,
   0.6,
-  "the older response never overrides the queued slider value",
+  "the older response never overrides the newer reading",
 );
-await completeUpdate(pendingUpdates[0], withSettings({ opacity: 0.6 }));
+await completeUpdate(pendingUpdates[0]);
 assert.equal(workingSlider("common.opacity").props.value, 0.6);
+assert.equal(livePageState.settings.opacity, 0.6);
 
 workingSlider("common.scale").props.onChange(1.2);
 await settle();
 assert.equal(workingSlider("common.scale").props.value, 1.2, "the scale moves optimistically");
-await completeUpdate(pendingUpdates[0], undefined, { fail: true });
+await completeUpdate(pendingUpdates[0], { fail: true });
 assert.equal(
   workingSlider("common.scale").props.value,
   1,
@@ -1076,10 +1235,37 @@ assert.ok(
   "the rejected write is reported",
 );
 
-const updatesBeforePreset = pageCalls.updates.length;
+workingSlider("common.deadzone").props.onChange(0.2);
+await settle();
+assert.deepEqual(issuedPatches.at(-1), { deadzone: 0.2 }, "a rejected write does not block the next one");
+await completeUpdate(pendingUpdates[0]);
+assert.equal(workingSlider("common.deadzone").props.value, 0.2);
+
+// A preset takes its own queue slot between the patches accepted before and
+// after it, so the later patch can never be merged backwards over the preset.
+const updatesBeforeBarrier = pageCalls.updates.length;
+workingSlider("common.opacity").props.onChange(0.65);
+await settle();
+workingSlider("common.opacity").props.onChange(0.7);
+await settle();
+workingSlider("common.opacity").props.onChange(0.72);
+await settle();
 pageButton(workingPage.runtime.tree, "Mine").props.onClick();
 await settle();
-assert.deepEqual(pageCalls.presets, ["custom-1"]);
+workingSlider("common.opacity").props.onChange(0.75);
+await settle();
+assert.deepEqual(issuedPatches.at(-1), { opacity: 0.65 });
+assert.deepEqual(pageCalls.presets, [], "the preset waits behind the accepted patches");
+
+await completeUpdate(pendingUpdates[0]);
+assert.deepEqual(issuedPatches.at(-1), { opacity: 0.72 }, "the patches accepted before it are merged");
+assert.deepEqual(pageCalls.presets, [], "the preset still waits for that merged write");
+await completeUpdate(pendingUpdates[0]);
+assert.deepEqual(pageCalls.presets, ["custom-1"], "the preset runs in its own slot");
+assert.deepEqual(issuedPatches.at(-1), { opacity: 0.75 }, "the later patch takes a new slot after it");
+await completeUpdate(pendingUpdates[0]);
+assert.equal(pageCalls.updates.length, updatesBeforeBarrier + 3, "four readings became three writes");
+assert.equal(workingSlider("common.opacity").props.value, 0.75);
 assert.ok(
   propStrings(workingPage.runtime.tree).includes(
     touch("en", "layout.currentPreset", {
@@ -1088,7 +1274,6 @@ assert.ok(
   ),
   "the chosen preset is reported on the page",
 );
-assert.equal(pageCalls.updates.length, updatesBeforePreset, "a preset choice does not re-send option patches");
 assert.equal(findAll(workingPage.runtime.tree, (node) => node.type === "PanelSection").length, 4);
 
 const showToggle = () => pageToggle(workingPage.runtime.tree, touch("en", "common.show"));
@@ -1101,4 +1286,4 @@ assert.equal(showToggle().props.checked, false, "the visibility toggle reflects 
 workingPage.runtime.unmount();
 assert.equal(timers.intervals.size, 0, "no page keeps polling once every page is unmounted");
 
-console.log("Touch integration tests passed: prefixed RPCs, global lifecycle, tab mount, the single touch page, and poll/remount ownership");
+console.log("Touch integration tests passed: prefixed RPCs, the shared mutation queue, global lifecycle, tab mount, the single touch page, and accepted work across remounts");
