@@ -21,6 +21,7 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 from py_modules.freedom_touch import session  # noqa: E402
 from py_modules.freedom_touch.daemon import Daemon  # noqa: E402
 from py_modules.freedom_touch.engine import TouchEngine  # noqa: E402
+from py_modules.freedom_touch.input_adapter import InputSink  # noqa: E402
 
 EV_SYN = 0
 EV_ABS = 3
@@ -112,6 +113,10 @@ class FakeSink:
         self.neutralized = 0
         self.closed = 0
         self.fail = False
+        # A countdown models a bridge that rejects the first N release calls;
+        # only accepted releases are counted in ``neutralized``.
+        self.neutralize_attempts = 0
+        self.neutralize_failures = 0
 
     def emit(self, events):
         self.batches.append(list(events))
@@ -119,6 +124,10 @@ class FakeSink:
             raise RuntimeError("sink emit failed")
 
     def neutralize(self):
+        self.neutralize_attempts += 1
+        if self.neutralize_failures > 0:
+            self.neutralize_failures -= 1
+            raise RuntimeError("sink neutralize failed")
         self.neutralized += 1
 
     def close(self):
@@ -137,6 +146,78 @@ class FakeBridge:
     def discover(self, source_path):
         self.discovered.append(source_path)
         return True, ""
+
+
+class RecordingDevice:
+    """uinput double for the real InputSink; never touches hardware."""
+
+    def __init__(self):
+        self.writes = []
+        self.syns = 0
+        self.closed = False
+
+    def write(self, event_type, code, value):
+        self.writes.append((event_type, code, value))
+
+    def syn(self):
+        self.syns += 1
+
+    def close(self):
+        self.closed = True
+
+
+class RecoverableBridge:
+    """Bridge double whose own composite can be lost and found again.
+
+    While ``reachable`` is False discovery clears ``own_path`` and every send
+    is rejected exactly like the real bridge, so a release cannot reach
+    InputPlumber.  ``touch_error`` models a channel that fails even though the
+    path is still known.
+    """
+
+    def __init__(self, own_path="/org/shadowblip/InputPlumber/composite/freedom"):
+        self.path = own_path
+        self._own_path = own_path
+        self.reachable = True
+        self.touch_error = None
+        self.discoveries = []
+        # Every call, accepted or not, in order.
+        self.touch_attempts = []
+        # Only the calls InputPlumber actually accepted.
+        self.touches = []
+        self.chords = []
+
+    @property
+    def own_path(self):
+        return self._own_path
+
+    def discover(self, source_path):
+        self.discoveries.append(source_path)
+        if not self.reachable:
+            self._own_path = None
+            return False, "no unique composite for %s" % (source_path,)
+        self._own_path = self.path
+        return True, ""
+
+    def send_touch(self, cap, index, touching, pressure, x, y):
+        self.touch_attempts.append(
+            (cap, index, touching, pressure, x, y)
+        )
+        if self.touch_error is not None:
+            raise self.touch_error
+        if self._own_path is None:
+            return False
+        self.touches.append((cap, index, touching, pressure, x, y))
+        return True
+
+    def send_event(self, cap, pressed):
+        return self._own_path is not None
+
+    def send_chord(self, caps):
+        if self._own_path is None:
+            return False
+        self.chords.append(list(caps))
+        return True
 
 
 class FakeFocus:
@@ -223,7 +304,8 @@ class FakeOverlay:
 
 
 class Harness:
-    def __init__(self, stdin_fd=None, install_signals=False):
+    def __init__(self, stdin_fd=None, install_signals=False, sink=None,
+                 bridge=None):
         self.now = 1000.0
         self.stdin_fd = stdin_fd
         self.install_signals = install_signals
@@ -231,8 +313,10 @@ class Harness:
         self.stderr = io.StringIO()
         self.touch = FakeTouch()
         self.source = FakeSource()
-        self.sink = FakeSink()
-        self.bridge = FakeBridge()
+        # A caller may inject the real InputSink over its own bridge double;
+        # the defaults keep the plain lifecycle fake.
+        self.sink = FakeSink() if sink is None else sink
+        self.bridge = FakeBridge() if bridge is None else bridge
         self.focus = FakeFocus()
         self.overlay = FakeOverlay([], "", {}, 1000, 1000, [1000])
         self.haptics = FakeHaptics()
@@ -566,6 +650,230 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertEqual(harness.touch.ungrabs, 1)
         self.assertGreaterEqual(harness.sink.neutralized, 1)
         self.assertEqual(harness.overlay.sent[-1]["visible"], False)
+
+    def _release_with_failing_neutralize(self, harness, failures=1):
+        """Release capture through the menu path with a rejecting sink."""
+
+        harness.sink.neutralize_failures = failures
+        harness.focus.apps = (769, 12345)
+        harness.now += 0.1
+        harness.daemon.tick(harness.now)
+        self.assertFalse(harness.daemon.capturing)
+
+    def test_release_neutralize_failure_pends_until_a_later_tick(self):
+        harness = Harness()
+        harness.activate()
+        harness.press_button_and_stick()
+
+        self._release_with_failing_neutralize(harness)
+        self.assertEqual(harness.touch.ungrabs, 1)
+        self.assertEqual(harness.sink.neutralize_attempts, 1)
+        self.assertEqual(harness.sink.neutralized, 0)
+        # The same frame still released every held control.
+        self.assertIn(("button", "a", False), harness.sink.batches[-1])
+
+        # A plain frame with no eligible session must finish the cleanup.
+        harness.now += 0.02
+        harness.daemon.tick(harness.now)
+
+        self.assertEqual(harness.sink.neutralize_attempts, 2)
+        self.assertEqual(harness.sink.neutralized, 1)
+        self.assertFalse(harness.daemon.capturing)
+        self.assertEqual(harness.touch.grabs, 1)
+        self.assertEqual(harness.touch.ungrabs, 1)
+
+    def test_successful_retry_is_not_repeated_on_later_ticks(self):
+        harness = Harness()
+        harness.activate()
+        harness.press_button_and_stick()
+
+        self._release_with_failing_neutralize(harness)
+        harness.now += 0.02
+        harness.daemon.tick(harness.now)
+        self.assertEqual(harness.sink.neutralized, 1)
+
+        # The normal path must not neutralize again once nothing is pending.
+        for _ in range(3):
+            harness.now += 0.02
+            harness.daemon.tick(harness.now)
+
+        self.assertEqual(harness.sink.neutralize_attempts, 2)
+        self.assertEqual(harness.sink.neutralized, 1)
+
+    def test_repeated_release_failures_are_retried_until_success(self):
+        harness = Harness()
+        harness.activate()
+        harness.press_button_and_stick()
+
+        self._release_with_failing_neutralize(harness, failures=2)
+        self.assertEqual(harness.sink.neutralize_attempts, 1)
+        self.assertEqual(harness.sink.neutralized, 0)
+
+        harness.now += 0.02
+        harness.daemon.tick(harness.now)
+
+        self.assertEqual(harness.sink.neutralize_attempts, 2)
+        self.assertEqual(harness.sink.neutralized, 0)
+        self.assertFalse(harness.daemon.capturing)
+        self.assertEqual(harness.touch.grabs, 1)
+
+        harness.now += 0.02
+        harness.daemon.tick(harness.now)
+
+        self.assertEqual(harness.sink.neutralize_attempts, 3)
+        self.assertEqual(harness.sink.neutralized, 1)
+        self.assertFalse(harness.daemon.capturing)
+        self.assertEqual(harness.touch.grabs, 1)
+
+    def test_pending_cleanup_runs_beside_the_normal_frame_work(self):
+        harness = Harness()
+        harness.activate()
+
+        self._release_with_failing_neutralize(harness, failures=2)
+        batches = len(harness.sink.batches)
+
+        # The panel is still read while the retry fails: the tap is tracked
+        # and nothing is dispatched to the released controller.
+        point = harness.control_point("btn_a")
+        harness.begin_touch_at(*point)
+        self.assertEqual(harness.sink.neutralize_attempts, 2)
+        self.assertEqual(harness.sink.neutralized, 0)
+        self.assertEqual(len(harness.sink.batches), batches)
+
+        harness.end_touch()
+        self.assertEqual(harness.sink.neutralize_attempts, 3)
+        self.assertEqual(harness.sink.neutralized, 1)
+        self.assertEqual(len(harness.sink.batches), batches)
+
+        # The capture decision is independent of the cleanup: the game
+        # regaining focus grabs again, and status output is unaffected.
+        harness.focus.apps = (12345, 12345)
+        harness.now += 0.1
+        harness.daemon.tick(harness.now)
+
+        self.assertTrue(harness.daemon.capturing)
+        self.assertEqual(harness.touch.grabs, 2)
+        self.assert_only_status_stdout(harness)
+
+    def test_own_path_loss_keeps_the_pad_release_pending(self):
+        device = RecordingDevice()
+        bridge = RecoverableBridge()
+        sink = InputSink(device, bridge)
+        harness = Harness(sink=sink, bridge=bridge)
+        harness.activate()
+        self.assertTrue(harness.daemon.capturing)
+
+        harness.begin_touch_at(*harness.control_point("pad_l"))
+        self.assertEqual(len(bridge.touches), 1)
+        self.assertEqual(
+            (bridge.touches[0][0], bridge.touches[0][2]),
+            ("Touchpad:LeftPad:Motion", True),
+        )
+
+        # The composite disappears: discovery clears own_path, so both the
+        # engine's release and the sink's neutralisation are rejected and the
+        # contact can only stay recorded in the sink.
+        bridge.reachable = False
+        harness.now += 1.0
+        harness.daemon.tick(harness.now)
+
+        self.assertFalse(harness.daemon.capturing)
+        self.assertEqual(harness.touch.ungrabs, 1)
+        self.assertTrue(harness.daemon._neutralize_pending)
+        self.assertEqual(len(bridge.touches), 1)
+        self.assertEqual(
+            [attempt[2] for attempt in bridge.touch_attempts[1:]],
+            [False, False],
+        )
+
+        # The finger lifts while the game is still in front.  The pending
+        # release alone must hold capture back, and no doomed retry may be
+        # sent while the bridge has no own path.
+        attempts = len(bridge.touch_attempts)
+        harness.end_touch()
+        self.assertEqual(len(bridge.touch_attempts), attempts)
+        self.assertFalse(harness.daemon.capturing)
+        self.assertEqual(harness.touch.grabs, 1)
+
+        # Steam's Quick Access Menu takes focus, and physical touches are
+        # still read while capture stays inactive.
+        harness.focus.apps = (769, 12345)
+        harness.begin_touch_at(*harness.control_point("btn_a"))
+        self.assertTrue(harness.daemon._native_contacts)
+        harness.end_touch()
+        self.assertFalse(harness.daemon._native_contacts)
+        self.assertEqual(device.writes, [])
+
+        # The composite is rediscovered while capture is still inactive: the
+        # retry must send the missing release without any new touch frame.
+        bridge.reachable = True
+        harness.now += 1.0
+        harness.daemon.tick(harness.now)
+
+        self.assertFalse(harness.daemon.capturing)
+        self.assertFalse(harness.daemon._neutralize_pending)
+        releases = [touch for touch in bridge.touches if touch[2] is False]
+        self.assertEqual(len(releases), 1)
+        self.assertEqual(
+            releases[0][:2], ("Touchpad:LeftPad:Motion", 0)
+        )
+
+        # Status publishing kept running and now reports the live composite.
+        status = harness.status_lines()[-1]["status"]
+        self.assertEqual(status["composite_path"], bridge.own_path)
+        self.assertFalse(status["capturing"])
+        self.assert_only_status_stdout(harness)
+
+        # One successful release finishes the cleanup for good.
+        count = len(bridge.touches)
+        for _ in range(3):
+            harness.now += 0.02
+            harness.daemon.tick(harness.now)
+        self.assertEqual(len(bridge.touches), count)
+
+    def test_pending_release_holds_capture_until_it_reaches_the_bridge(self):
+        device = RecordingDevice()
+        bridge = RecoverableBridge()
+        sink = InputSink(device, bridge)
+        harness = Harness(sink=sink, bridge=bridge)
+        harness.activate()
+
+        harness.begin_touch_at(*harness.control_point("pad_l"))
+
+        # QAM takes focus while the touch channel fails: the release cannot
+        # reach InputPlumber even though the composite is still known.
+        bridge.touch_error = OSError("bus down")
+        harness.focus.apps = (769, 12345)
+        harness.now += 0.1
+        harness.daemon.tick(harness.now)
+
+        self.assertFalse(harness.daemon.capturing)
+        self.assertEqual(harness.touch.ungrabs, 1)
+        self.assertTrue(harness.daemon._neutralize_pending)
+
+        # The game regains focus while the channel is still broken: capture
+        # must not grab over the contact that was never released.
+        harness.focus.apps = (12345, 12345)
+        harness.now += 0.1
+        harness.daemon.tick(harness.now)
+
+        self.assertFalse(harness.daemon.capturing)
+        self.assertFalse(harness.daemon.engine.active)
+        self.assertEqual(harness.touch.grabs, 1)
+
+        # With the channel back the retry clears the contact, and only that
+        # cleared state lets the same frame grab the panel again.
+        bridge.touch_error = None
+        harness.now += 0.02
+        harness.daemon.tick(harness.now)
+
+        self.assertFalse(harness.daemon._neutralize_pending)
+        self.assertTrue(harness.daemon.capturing)
+        self.assertEqual(harness.touch.grabs, 2)
+        self.assertEqual(
+            bridge.touches[-1][:3],
+            ("Touchpad:LeftPad:Motion", 0, False),
+        )
 
     def test_scale_0_6_shrinks_hits_to_the_overlay_geometry(self):
         harness = Harness()

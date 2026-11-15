@@ -326,6 +326,9 @@ class Daemon:
         self.aspect_ratio = 1.0
         self.focus_apps = (None, None)
         self._capture_block_until = -1e9
+        # A failed release neutralisation may leave a contact on the sink, so
+        # it stays pending until one later attempt succeeds.
+        self._neutralize_pending = False
 
         # Collapsed chrome is a mode of its own: the pill requests a complete
         # overlay hide, while controls_visible is the session-only request
@@ -1168,6 +1171,13 @@ class Daemon:
             self._expand_pending = False
             return
 
+        if self._neutralize_pending:
+            # An earlier release never reached the bridge.  A new grab would
+            # put our engine on top of that uncleared input, so capture waits
+            # until _retry_neutralize() succeeds; physical contact tracking
+            # and status publishing keep running on every frame.
+            return
+
         # Never grab in the middle of a game-owned touch sequence.
         if self._native_idle():
             self._capture(now)
@@ -1223,7 +1233,12 @@ class Daemon:
                 try:
                     self.sink.neutralize()
                 except Exception as exc:
+                    # The sink may still hold the released contact; keep the
+                    # failure pending so a later frame finishes the cleanup.
+                    self._neutralize_pending = True
                     self._log("sink neutralize failed: %s" % (exc,))
+                else:
+                    self._neutralize_pending = False
             self.frame = FrameAccumulator()
             self._visual_force = True
 
@@ -1241,6 +1256,40 @@ class Daemon:
         self._ungrab()
         self._reset_pill()
         self._log("capture released: %s" % (reason,))
+
+    def _retry_neutralize(self):
+        """Finish a release neutralisation the sink rejected.
+
+        The pending flag belongs to the capture release only and is cleared by
+        the first successful call.  It is retried from the frame loop in every
+        mode - released, cooldown, hidden controls, or no eligible session -
+        because an unreleased pad contact survives all of those.  A failure is
+        logged and left pending.
+
+        A pending retry never blocks the physical passive read, contact
+        tracking or status publishing; it only withholds the next grab, which
+        _update_capture allows again once this call has succeeded.  While the
+        bridge has no own composite, every touch call would be rejected before
+        reaching InputPlumber, so the retry waits for discovery to find it
+        again instead of sending doomed releases on every frame.
+        """
+
+        if not self._neutralize_pending:
+            return
+        sink = self.sink
+        if sink is None:
+            # Closing the sink dropped the channel itself; the flag survives
+            # so the next sink is cleaned once before it is used.
+            return
+        bridge = self.bridge
+        if bridge is None or getattr(bridge, "own_path", None) is None:
+            return
+        try:
+            sink.neutralize()
+        except Exception as exc:
+            self._log("sink neutralize retry failed: %s" % (exc,))
+            return
+        self._neutralize_pending = False
 
     def _ungrab(self):
         self._unregister_touch()
@@ -1832,6 +1881,10 @@ class Daemon:
         self._poll_overlay(now)
         self._poll_focus(now)
         self._poll_haptics(now)
+        # Retry an outstanding release neutralisation before deciding capture,
+        # so a leftover contact is cleared ahead of any new grab; a failure is
+        # contained inside the retry and cannot block the rest of the frame.
+        self._retry_neutralize()
         self._update_capture(now)
         # Eligibility is evaluated before the passive stream is consumed, so
         # a lost menu/focus/heartbeat cancels even with no new touch frame.

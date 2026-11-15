@@ -21,11 +21,21 @@ class FakeDevice:
         self.writes = []
         self.syns = 0
         self.closed = False
+        # Countdowns model a device that rejects its next N writes or SYNs;
+        # only accepted calls appear in ``writes``/``syns``.
+        self.write_failures = 0
+        self.syn_failures = 0
 
     def write(self, event_type, code, value):
+        if self.write_failures > 0:
+            self.write_failures -= 1
+            raise OSError("write failed")
         self.writes.append((event_type, code, value))
 
     def syn(self):
+        if self.syn_failures > 0:
+            self.syn_failures -= 1
+            raise OSError("syn failed")
         self.syns += 1
 
     def close(self):
@@ -41,6 +51,9 @@ class FakeBridge:
         # ``touch_error`` raises instead of replying while it is set.
         self.touch_results = []
         self.touch_error = None
+        # Same contract for send_chord, which owns the native menu chords.
+        self.chord_results = []
+        self.chord_error = None
 
     def send_touch(self, cap, index, touching, pressure, x, y):
         self.touches.append(
@@ -55,6 +68,9 @@ class FakeBridge:
 
     def send_chord(self, caps):
         self.chords.append(list(caps))
+        if self.chord_error is not None:
+            raise self.chord_error
+        return self.chord_results.pop(0) if self.chord_results else True
 
 
 class InputSinkTests(unittest.TestCase):
@@ -249,6 +265,56 @@ class InputSinkTests(unittest.TestCase):
         self.assertEqual(self.device.writes, [])
         self.assertEqual(self.device.syns, 0)
 
+    def _chord_senders(self):
+        return (
+            ("pad_press", [("pad_press", "left", True)]),
+            ("qam", [("button", "qam", True)]),
+        )
+
+    def test_rejected_native_chord_reaches_the_runtime(self):
+        # A native chord owns its own release, so a failure may only be
+        # reported: no synthetic release and no uinput writes.
+        for label, events in self._chord_senders():
+            with self.subTest(sender=label):
+                device = FakeDevice()
+                bridge = FakeBridge()
+                sink = InputSink(device, bridge)
+                bridge.chord_results = [False]
+
+                with self.assertRaises(RuntimeError):
+                    sink.emit(events)
+
+                self.assertEqual(len(bridge.chords), 1)
+                self.assertEqual(device.writes, [])
+                self.assertEqual(device.syns, 0)
+
+    def test_none_chord_reply_keeps_the_legacy_double_working(self):
+        for label, events in self._chord_senders():
+            with self.subTest(sender=label):
+                device = FakeDevice()
+                bridge = FakeBridge()
+                sink = InputSink(device, bridge)
+                bridge.chord_results = [None]
+
+                sink.emit(events)
+
+                self.assertEqual(len(bridge.chords), 1)
+                self.assertEqual(device.writes, [])
+
+    def test_raised_chord_error_propagates_unchanged(self):
+        for label, events in self._chord_senders():
+            with self.subTest(sender=label):
+                device = FakeDevice()
+                bridge = FakeBridge()
+                sink = InputSink(device, bridge)
+                bridge.chord_error = OSError("bus down")
+
+                with self.assertRaises(OSError) as caught:
+                    sink.emit(events)
+
+                self.assertEqual(str(caught.exception), "bus down")
+                self.assertEqual(device.writes, [])
+
     def test_neutralize_releases_all_once_and_is_idempotent(self):
         self.sink.emit(
             [
@@ -366,6 +432,81 @@ class InputSinkTests(unittest.TestCase):
         touches = len(self.bridge.touches)
         self.sink.neutralize()
         self.assertEqual(len(self.bridge.touches), touches)
+
+    def _release_with_a_lost_syn(self):
+        """Hold a button and an axis, then fail the release frame's SYN."""
+
+        self.sink.emit([("button", "a", True), ("axis", "lx", 0.5)])
+        self.assertEqual(self.device.syns, 1)
+
+        self.device.syn_failures = 1
+        with self.assertRaises(OSError):
+            self.sink.emit([("button", "a", False), ("axis", "lx", 0.0)])
+
+        # The writes were accepted, so the caches are already neutral and
+        # only the frame report is missing.
+        self.assertEqual(self.device.syns, 1)
+        self.assertEqual(self.sink._buttons, set())
+        self.assertEqual(self.sink._axes, {})
+        return list(self.device.writes)
+
+    def test_lost_syn_is_reported_by_the_next_frame_without_new_values(self):
+        writes = self._release_with_a_lost_syn()
+
+        self.sink.emit([])
+
+        self.assertEqual(self.device.writes, writes)
+        self.assertEqual(self.device.syns, 2)
+
+        # The owed report is sent exactly once, not on every later frame.
+        self.sink.emit([])
+        self.assertEqual(self.device.writes, writes)
+        self.assertEqual(self.device.syns, 2)
+
+    def test_lost_syn_is_reported_by_neutralize_without_new_values(self):
+        writes = self._release_with_a_lost_syn()
+
+        self.sink.neutralize()
+
+        self.assertEqual(self.device.writes, writes)
+        self.assertEqual(self.device.syns, 2)
+
+        self.sink.neutralize()
+        self.sink.emit([])
+        self.assertEqual(self.device.writes, writes)
+        self.assertEqual(self.device.syns, 2)
+
+    def test_syn_is_still_owed_when_a_later_write_in_the_batch_fails(self):
+        device = FakeDevice()
+        sink = InputSink(device, FakeBridge())
+        # Keep the real bound writer: the wrapper replaces device.write, so
+        # calling device.write here would re-enter the wrapper forever.
+        real_write = device.write
+        calls = []
+
+        def flaky_write(event_type, code, value):
+            calls.append((event_type, code, value))
+            if len(calls) == 2:
+                raise OSError("write failed")
+            real_write(event_type, code, value)
+
+        device.write = flaky_write
+
+        with self.assertRaises(OSError):
+            sink.emit([("button", "a", True), ("axis", "lx", 0.5)])
+
+        # The first write reached the kernel but no SYN was sent for it.
+        self.assertEqual(device.writes, [(1, 304, 1)])
+        self.assertEqual(device.syns, 0)
+
+        sink.neutralize()
+
+        self.assertEqual(device.writes, [(1, 304, 1), (1, 304, 0)])
+        self.assertEqual(device.syns, 1)
+
+        sink.neutralize()
+        self.assertEqual(device.writes, [(1, 304, 1), (1, 304, 0)])
+        self.assertEqual(device.syns, 1)
 
     def test_close_neutralizes_then_closes_device(self):
         self.sink.emit([("button", "a", True)])

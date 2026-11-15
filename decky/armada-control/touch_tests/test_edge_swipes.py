@@ -228,6 +228,26 @@ def move_frame(slot, x, y):
     ]
 
 
+def moves_frame(*moves):
+    """Return one frame that moves several slots before a single SYN_REPORT.
+
+    Concatenating ``move_frame`` results would deliver one frame per move,
+    which hides ordering bugs between two pointers of the same frame.
+    """
+
+    events = []
+    for slot, x, y in moves:
+        events.extend(
+            [
+                FakeEvent(EV_ABS, MT_SLOT, slot),
+                FakeEvent(EV_ABS, MT_POSITION_X, x),
+                FakeEvent(EV_ABS, MT_POSITION_Y, y),
+            ]
+        )
+    events.append(FakeEvent(EV_SYN, SYN_REPORT, 0))
+    return events
+
+
 def advance(harness, events, step=0.02):
     harness.push_frame(events)
     harness.now += step
@@ -280,12 +300,11 @@ class EdgeSwipeDaemonTests(unittest.TestCase):
         advance(harness, begin_frame(2, 3, 20, 150))
         self.assertEqual(harness.bridge.chords, [])
 
-        # The same frame also carries a stick move and the menu swipe; the
-        # stale axis must not be sent to the game.
-        advance(
-            harness,
-            move_frame(1, 240, 485) + move_frame(2, 170, 150),
-        )
+        # One frame carries both the stick move and the menu swipe; the stale
+        # axis must not be sent to the game.
+        batches = len(harness.sink.batches)
+        advance(harness, moves_frame((1, 240, 485), (2, 170, 150)))
+        frame_batches = harness.sink.batches[batches:]
 
         self.assertEqual(
             harness.bridge.chords, [["Gamepad:Button:Guide"]]
@@ -297,19 +316,21 @@ class EdgeSwipeDaemonTests(unittest.TestCase):
         self.assertEqual(harness.touch.ungrabs, 1)
         self.assertGreaterEqual(harness.sink.neutralized, 1)
 
-        released = harness.sink.batches[-1]
+        # The frame produced the release neutralisation only: the menu wins
+        # over the stick move, so no axis value and no menu event may leave.
+        self.assertEqual(len(frame_batches), 1)
+        released = frame_batches[0]
         self.assertIn(("button", "a", False), released)
-        self.assertFalse(
-            any(event[0] == MENU_KIND for event in released)
-        )
-        self.assertFalse(
-            any(
-                event[0] == "axis"
-                and event[1] == "lx"
-                and event[2] != 0
-                for event in released
+        for batch in frame_batches:
+            self.assertFalse(
+                any(event[0] == MENU_KIND for event in batch)
             )
-        )
+            self.assertFalse(
+                any(
+                    event[0] == "axis" and event[2] != 0
+                    for event in batch
+                )
+            )
 
     def test_right_edge_sends_the_quick_access_chord(self):
         harness = Harness()
@@ -333,7 +354,7 @@ class EdgeSwipeDaemonTests(unittest.TestCase):
         advance(harness, begin_frame(2, 2, 980, 150))
         advance(
             harness,
-            move_frame(1, 170, 150) + move_frame(2, 830, 150),
+            moves_frame((1, 170, 150), (2, 830, 150)),
         )
 
         self.assertEqual(

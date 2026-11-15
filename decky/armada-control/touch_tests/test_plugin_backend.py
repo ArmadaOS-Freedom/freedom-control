@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -1331,3 +1332,539 @@ def test_saved_edge_swipes_follow_the_canonical_policy(plugin, tmp_path):
         persisted = json.load(handle)
     assert persisted["edge_swipes"] is False
     assert after["settings"]["opacity"] == 0.85
+
+
+# ---------------------------------------------------------------------------
+# Unexpected child exit: bounded automatic restart
+# ---------------------------------------------------------------------------
+
+
+class _WaitableChild(_FakeChild):
+    """Fake child whose exit is driven by a real asyncio wait event."""
+
+    def __init__(self):
+        super().__init__(returncode=None)
+        self.exit_event = asyncio.Event()
+
+    async def wait(self):
+        await self.exit_event.wait()
+        return self.returncode
+
+    def crash(self, returncode=7):
+        self.returncode = returncode
+        self.exit_event.set()
+
+
+async def _until(predicate, timeout=2.0):
+    """Await a real event, never a guessed sleep, with a bounded deadline."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() >= deadline:
+            raise AssertionError("condition was not reached in time")
+        await asyncio.sleep(0.005)
+
+
+def _install_children(plugin, monkeypatch, count):
+    """Spawn fake children in order and return (children, started)."""
+
+    children = [_WaitableChild() for _ in range(count)]
+    started = []
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        if len(started) >= len(children):
+            raise AssertionError("the controller spawned more children than planned")
+        child = children[len(started)]
+        started.append(child)
+        return child
+
+    monkeypatch.setattr(
+        controller_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    # The shared fixture stubs _start_child out; restore the real lifecycle.
+    plugin.__dict__.pop("_start_child", None)
+    return children, started
+
+
+def _messages(child):
+    return [
+        json.loads(line) for line in child.stdin.data.decode("utf-8").splitlines()
+    ]
+
+
+class _StopAwareStdin(_FakeStdin):
+    """Fake stdin: the parent's stop command ends the child with code 0."""
+
+    def __init__(self, child):
+        super().__init__()
+        self._child = child
+
+    def write(self, data):
+        super().write(data)
+        if b'"stop"' in data:
+            self._child.crash(0)
+
+    async def drain(self):
+        # Yield once so the exit report really runs while the parent's stop is
+        # latched: that latch, not the exit code, must suppress recovery.
+        await asyncio.sleep(0)
+
+
+def test_unexpected_exit_restarts_and_resends_settings_once(plugin, monkeypatch):
+    children, started = _install_children(plugin, monkeypatch, 2)
+    monkeypatch.setattr(controller_module, "RESTART_BACKOFF_SECONDS", (0.0,))
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        assert plugin._child is children[0]
+        children[0].crash(7)
+        await _until(
+            lambda: len(started) == 2
+            and plugin._child is children[1]
+            and plugin._restart_task is None
+        )
+        return plugin._snapshot()
+
+    state = asyncio.run(scenario())
+
+    # The exit code is reported while the restart is pending, then the fresh
+    # process gets exactly the persisted settings once.
+    assert len(started) == 2
+    assert plugin._restart_attempts == 1
+    assert state["status"]["state"] == "starting"
+    expected = json.loads(json.dumps(plugin._settings))
+    for child in started:
+        assert _messages(child) == [{"type": "settings", "settings": expected}]
+
+
+def test_disable_cancels_a_pending_restart(plugin, monkeypatch):
+    children, started = _install_children(plugin, monkeypatch, 2)
+    monkeypatch.setattr(controller_module, "RESTART_BACKOFF_SECONDS", (0.3,))
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        children[0].crash(7)
+        await _until(lambda: plugin._restart_task is not None)
+        state = await plugin.update_options({"enabled": False})
+        # Long past the backoff: the cancelled restart must not fire.
+        await asyncio.sleep(0.4)
+        return state
+
+    state = asyncio.run(scenario())
+
+    assert len(started) == 1
+    assert plugin._child is None
+    assert plugin._restart_task is None
+    assert state["status"]["state"] == "disabled"
+
+
+def test_shutdown_cancels_a_pending_restart(plugin, monkeypatch):
+    children, started = _install_children(plugin, monkeypatch, 2)
+    monkeypatch.setattr(controller_module, "RESTART_BACKOFF_SECONDS", (0.3,))
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        children[0].crash(7)
+        await _until(lambda: plugin._restart_task is not None)
+        await plugin.shutdown()
+        await asyncio.sleep(0.4)
+
+    asyncio.run(scenario())
+
+    assert len(started) == 1
+    assert plugin._child is None
+    assert plugin._restart_task is None
+    assert plugin._shutdown is True
+
+
+def test_a_replaced_child_reporting_late_is_ignored(plugin, monkeypatch):
+    children, started = _install_children(plugin, monkeypatch, 2)
+    monkeypatch.setattr(controller_module, "RESTART_BACKOFF_SECONDS", (0.0,))
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        old = children[0]
+        old.crash(7)
+        await _until(
+            lambda: len(started) == 2
+            and plugin._child is children[1]
+            and plugin._restart_task is None
+        )
+        plugin._status = {
+            "state": "ready",
+            "detail": "ok",
+            "capturing": True,
+            "controls_visible": True,
+        }
+        # The replaced child's own wait event fires late; the parent must not
+        # report it or schedule a restart for the current instance.
+        await plugin._wait_child(old)
+        await asyncio.sleep(0.05)
+        return plugin._snapshot(), plugin._restart_task
+
+    state, restart = asyncio.run(scenario())
+
+    assert len(started) == 2
+    assert restart is None
+    assert state["status"]["state"] == "ready"
+    assert plugin._child is started[1]
+
+
+def test_repeated_quick_exits_stop_at_the_restart_budget(plugin, monkeypatch):
+    children, started = _install_children(plugin, monkeypatch, 6)
+    monkeypatch.setattr(
+        controller_module, "RESTART_BACKOFF_SECONDS", (0.0, 0.0, 0.0)
+    )
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        for index in (1, 2, 3):
+            started[-1].crash(7)
+            await _until(
+                lambda: plugin._child is children[index]
+                and plugin._restart_task is None
+            )
+        started[-1].crash(7)
+        await _until(lambda: "停止自动重启" in plugin._status["detail"])
+        await asyncio.sleep(0.05)
+        return plugin._snapshot()
+
+    state = asyncio.run(scenario())
+
+    # The initial start plus exactly three restarts, then the budget is spent.
+    assert len(started) == 4
+    assert plugin._restart_attempts == 3
+    assert plugin._child is children[3]
+    assert plugin._child_running() is False
+    assert plugin._restart_task is None
+    assert state["status"]["state"] == "unavailable"
+
+
+def test_explicit_enable_after_exhaustion_opens_a_fresh_budget(plugin, monkeypatch):
+    children, started = _install_children(plugin, monkeypatch, 6)
+    monkeypatch.setattr(
+        controller_module, "RESTART_BACKOFF_SECONDS", (0.0, 0.0, 0.0)
+    )
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        for index in (1, 2, 3):
+            started[-1].crash(7)
+            await _until(
+                lambda: plugin._child is children[index]
+                and plugin._restart_task is None
+            )
+        started[-1].crash(7)
+        await _until(lambda: "停止自动重启" in plugin._status["detail"])
+        return await plugin.update_options({"enabled": True})
+
+    state = asyncio.run(scenario())
+
+    assert len(started) == 5
+    assert plugin._restart_attempts == 0
+    assert plugin._child is started[-1]
+    assert state["status"]["state"] == "starting"
+    assert len(_messages(started[-1])) == 1
+
+
+def test_a_child_that_ran_stably_opens_a_fresh_budget(plugin, monkeypatch):
+    children, started = _install_children(plugin, monkeypatch, 2)
+    monkeypatch.setattr(controller_module, "RESTART_BACKOFF_SECONDS", (0.0,))
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        plugin._restart_attempts = 2
+        plugin._child_started_at = (
+            asyncio.get_running_loop().time()
+            - controller_module.STABLE_CHILD_UPTIME_SECONDS
+            - 1.0
+        )
+        children[0].crash(7)
+        await _until(lambda: len(started) == 2)
+        return plugin._restart_attempts
+
+    assert asyncio.run(scenario()) == 1
+
+
+def test_restart_spawn_failure_keeps_the_error_and_a_manual_retry_works(
+    plugin, monkeypatch
+):
+    first = _WaitableChild()
+    second = _WaitableChild()
+    outcomes = [first, OSError("python3 missing"), second]
+    calls = []
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        calls.append(1)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(
+        controller_module.asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(controller_module, "RESTART_BACKOFF_SECONDS", (0.0,))
+    plugin.__dict__.pop("_start_child", None)
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        first.crash(7)
+        await _until(lambda: len(calls) == 2 and plugin._restart_task is None)
+        await asyncio.sleep(0.05)
+        failed = plugin._snapshot()
+        recovered = await plugin.update_options({"enabled": True})
+        return failed, recovered
+
+    failed, recovered = asyncio.run(scenario())
+
+    # The failed spawn is reported, not hidden, and no background loop keeps
+    # hammering: only an explicit enable retries.
+    assert len(calls) == 3
+    assert failed["status"]["state"] == "error"
+    assert "无法启动触摸控制器" in failed["status"]["detail"]
+    assert plugin._child is second
+    assert recovered["status"]["state"] == "starting"
+    assert len(_messages(second)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle gaps: an exit during the replacement's start, the late enable after
+# shutdown, and a zero exit that the parent did not ask for
+# ---------------------------------------------------------------------------
+
+
+def test_replacement_exiting_during_its_start_is_still_retried(
+    plugin, monkeypatch
+):
+    children, started = _install_children(plugin, monkeypatch, 3)
+    monkeypatch.setattr(
+        controller_module, "RESTART_BACKOFF_SECONDS", (0.0, 0.0, 0.0)
+    )
+    replacement = children[1]
+    # The replacement dies before _start_child has finished the initial
+    # settings write, i.e. while the restart still owns _restart_task.
+    replacement.stdin = _GatedStdin()
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        children[0].crash(7)
+        await asyncio.wait_for(replacement.stdin.entered.wait(), 1.0)
+
+        # Crash the replacement while its drain is still blocked: the test
+        # must not wait for the restart task to finish and crash it afterwards,
+        # which would hide the race instead of reproducing it.
+        replacement.crash(7)
+        # The exit report runs while the restart task is in flight, which is
+        # exactly the window in which it used to be dropped.
+        await _until(lambda: plugin._status["state"] == "unavailable")
+        assert plugin._restart_task is not None
+        assert not plugin._restart_task.done()
+
+        replacement.stdin.release.set()
+        await _until(
+            lambda: plugin._child is children[2]
+            and plugin._restart_task is None
+        )
+        return plugin._restart_attempts, plugin._snapshot()
+
+    attempts, state = asyncio.run(scenario())
+
+    # Initial start, the restart that lost its child, and the retry that
+    # followed it: the exit was neither dropped nor started twice.
+    assert len(started) == 3
+    assert attempts == 2
+    assert state["status"]["state"] == "starting"
+    expected = json.loads(json.dumps(plugin._settings))
+    for child in started:
+        assert _messages(child) == [{"type": "settings", "settings": expected}]
+
+
+def test_late_enable_after_shutdown_never_starts_a_child(
+    plugin, monkeypatch, tmp_path
+):
+    children, started = _install_children(plugin, monkeypatch, 2)
+    children[0].stdin = _StopAwareStdin(children[0])
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        await plugin.shutdown()
+        state = await plugin.update_options({"enabled": True})
+        await asyncio.sleep(0.05)
+        return state, await plugin.get_state()
+
+    state, final = asyncio.run(scenario())
+
+    assert len(started) == 1
+    assert plugin._child is None
+    assert plugin._restart_task is None
+    assert plugin._shutdown is True
+    # The settings are still saved for the next startup, but this instance
+    # never claims that something is running.
+    assert state["settings"]["enabled"] is True
+    assert final["settings"]["enabled"] is True
+    assert final["status"]["state"] not in ("starting", "ready")
+    with (tmp_path / "settings" / "touch-controller.json").open(
+        "r", encoding="utf-8"
+    ) as handle:
+        persisted = json.load(handle)
+    assert persisted["enabled"] is True
+
+
+def test_an_unexpected_zero_exit_is_restarted(plugin, monkeypatch):
+    children, started = _install_children(plugin, monkeypatch, 2)
+    monkeypatch.setattr(controller_module, "RESTART_BACKOFF_SECONDS", (0.0,))
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        children[0].crash(0)
+        await _until(
+            lambda: len(started) == 2
+            and plugin._child is children[1]
+            and plugin._restart_task is None
+        )
+        return plugin._snapshot()
+
+    state = asyncio.run(scenario())
+
+    # A clean exit status is not evidence that the parent asked for the stop:
+    # it must produce exactly one live replacement, which receives the
+    # persisted settings once, while the controller reports the fresh start.
+    # The old child's exit text is transient and already replaced by the
+    # replacement's own start status, so the behaviour is asserted instead.
+    assert len(started) == 2
+    assert started == children
+    assert plugin._child is children[1]
+    assert plugin._child_running() is True
+    assert plugin._restart_attempts == 1
+    assert plugin._restart_task is None
+    assert state["status"]["state"] == "starting"
+    assert state["status"]["capturing"] is False
+    assert _messages(children[1]) == [
+        {
+            "type": "settings",
+            "settings": json.loads(json.dumps(plugin._settings)),
+        }
+    ]
+
+
+def test_parent_requested_stop_with_zero_exit_is_not_recovered(
+    plugin, monkeypatch
+):
+    children, started = _install_children(plugin, monkeypatch, 2)
+    monkeypatch.setattr(controller_module, "RESTART_BACKOFF_SECONDS", (0.0,))
+    children[0].stdin = _StopAwareStdin(children[0])
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        state = await plugin.update_options({"enabled": False})
+        await asyncio.sleep(0.05)
+        return state, await plugin.get_state()
+
+    disabled, final = asyncio.run(scenario())
+
+    # The parent's own stop is the authority, so the same zero exit that is
+    # recovered above must not bring a child back here.
+    assert len(started) == 1
+    assert plugin._child is None
+    assert plugin._restart_task is None
+    assert plugin._restart_handled_child is None
+    assert disabled["status"]["state"] == "disabled"
+    assert final["status"] == disabled["status"]
+    assert "退出" not in final["status"]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Persistence off the event loop
+# ---------------------------------------------------------------------------
+
+def test_blocking_persist_keeps_the_event_loop_responsive(plugin, monkeypatch):
+    real_persist = plugin._persist_settings
+    entered = threading.Event()
+    release = threading.Event()
+
+    def gated(settings):
+        entered.set()
+        if not release.wait(5.0):
+            raise AssertionError("the persist gate was never released")
+        real_persist(settings)
+
+    monkeypatch.setattr(plugin, "_persist_settings", gated)
+
+    async def scenario():
+        await _start(plugin)
+        save = asyncio.create_task(plugin.update_options({"opacity": 0.6}))
+        await _until(entered.is_set)
+        assert not save.done()
+
+        # The fsync is blocked in a worker thread; timers and reads still run.
+        fired = asyncio.Event()
+        asyncio.get_running_loop().call_later(0.01, fired.set)
+        await asyncio.wait_for(fired.wait(), 1.0)
+        pending = await asyncio.wait_for(plugin.get_state(), 1.0)
+        assert not save.done()
+        assert pending["settings"]["opacity"] != 0.6
+
+        release.set()
+        return await asyncio.wait_for(save, 5.0)
+
+    state = asyncio.run(scenario())
+
+    assert state["settings"]["opacity"] == 0.6
+
+
+def test_two_saves_persist_in_order(plugin, tmp_path, monkeypatch):
+    real_persist = plugin._persist_settings
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    persisted = []
+
+    def gated(settings):
+        persisted.append(settings["opacity"])
+        if len(persisted) == 1:
+            first_entered.set()
+            if not release_first.wait(5.0):
+                raise AssertionError("the persist gate was never released")
+        real_persist(settings)
+
+    monkeypatch.setattr(plugin, "_persist_settings", gated)
+
+    async def scenario():
+        await _start(plugin)
+        first = asyncio.create_task(plugin.update_options({"opacity": 0.55}))
+        await _until(first_entered.is_set)
+        second = asyncio.create_task(plugin.update_options({"opacity": 0.65}))
+        await asyncio.sleep(0.05)
+        # The second save waits for the first one's fsync to finish.
+        assert persisted == [0.55]
+        assert not second.done()
+        release_first.set()
+        await asyncio.wait_for(asyncio.gather(first, second), 5.0)
+        return await plugin.get_state()
+
+    state = asyncio.run(scenario())
+
+    assert persisted == [0.55, 0.65]
+    assert state["settings"]["opacity"] == 0.65
+    with (tmp_path / "settings" / "touch-controller.json").open(
+        "r", encoding="utf-8"
+    ) as handle:
+        stored = json.load(handle)
+    assert stored["opacity"] == 0.65

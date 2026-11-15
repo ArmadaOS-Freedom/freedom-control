@@ -110,6 +110,9 @@ class InputSink:
         self._buttons = set()
         self._axes = {}
         self._pads = {}
+        # False once a write reached the device but its frame report has not;
+        # the kernel only applies written values when a SYN follows.
+        self._synced = True
 
     def emit(self, events):
         """Apply one engine frame and emit at most one uinput SYN.
@@ -117,6 +120,11 @@ class InputSink:
         Writes are coalesced by ``(event_type, code)`` so repeated changes in a
         frame collapse to the final value.  Values identical to the last
         flushed state are not written.
+
+        A native chord that the bridge rejects with an explicit ``False``
+        raises ``RuntimeError``; a raised bridge exception propagates
+        unchanged.  Both reach the runtime's device-recovery path.  Nothing
+        here sends a synthetic release, because the chord owns its own.
         """
 
         pending = {}
@@ -145,15 +153,18 @@ class InputSink:
                     continue
                 chord = PAD_PRESS_CHORDS.get(event[1])
                 if chord is not None:
-                    self.bridge.send_chord([chord])
+                    self._send_chord([chord])
 
         if pending:
             self._flush(pending)
+        # A frame whose SYN never reached the kernel still owes one, even
+        # when this frame carries no new value at all.
+        self._sync_if_needed()
 
     def _button_event(self, output, pressed, pending):
         if output == "qam":
             if pressed:
-                self.bridge.send_chord([QAM_CHORD])
+                self._send_chord([QAM_CHORD])
             return
 
         trigger = _TRIGGER_AXES.get(output)
@@ -213,6 +224,18 @@ class InputSink:
         if self.bridge.send_touch(cap, 0, touching, pressure, x, y) is False:
             raise RuntimeError("touch send failed for %s" % (cap,))
 
+    def _send_chord(self, caps):
+        """Send one native chord and treat an explicit ``False`` as failure.
+
+        ``None`` keeps the older test-double contract and counts as success;
+        a raised exception propagates unchanged.  A failed chord is only
+        reported, never "released": the bridge owns the whole chord, so a
+        second event here could leave the composite half-pressed.
+        """
+
+        if self.bridge.send_chord(list(caps)) is False:
+            raise RuntimeError("chord send failed for %s" % (caps[0],))
+
     def _flush(self, pending):
         changed = False
         for (event_type, code), value in pending.items():
@@ -224,6 +247,9 @@ class InputSink:
                 continue
 
             self.device.write(event_type, code, value)
+            # The kernel holds this value now: even if a later write in the
+            # same batch fails, its frame report is still owed.
+            self._synced = False
             changed = True
             if event_type == EV_KEY:
                 if value:
@@ -237,6 +263,15 @@ class InputSink:
 
         if changed:
             self.device.syn()
+            self._synced = True
+
+    def _sync_if_needed(self):
+        """Report writes the kernel never acknowledged with exactly one SYN."""
+
+        if self._synced:
+            return
+        self.device.syn()
+        self._synced = True
 
     def neutralize(self):
         """Release every held control and return to a neutral state.
@@ -248,6 +283,10 @@ class InputSink:
         the pad failure is reported afterwards, as ``RuntimeError`` for an
         explicit ``False`` or unchanged for a raised bridge exception, so the
         runtime can recover.
+
+        A release whose SYN was lost is finished here as well: the caches are
+        already neutral, so without this the kernel would keep the last
+        reported state and the controls would appear stuck.
         """
 
         failure = None
@@ -279,6 +318,7 @@ class InputSink:
             self._flush(pending)
         self._buttons.clear()
         self._axes.clear()
+        self._sync_if_needed()
 
         if failure is not None:
             # An explicit False already surfaced as RuntimeError; a bridge

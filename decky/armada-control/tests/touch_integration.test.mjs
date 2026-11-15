@@ -529,14 +529,18 @@ assert.equal(globalThis.__touchHeartbeats.at(-1), "777");
 // ---------------------------------------------------------------------------
 
 // A heartbeat already in flight when the plugin dismounts must not send again,
-// and the cleared interval callback must be inert.
-let releaseHeartbeat;
+// and the cleared interval callback must be inert. Each request captures its own
+// resolver, so completing the pre-dispose one cannot settle the final cleanup
+// heartbeat instead.
+const heartbeatResolvers = [];
 globalThis.__touchHeartbeatResult = () => new Promise((resolve) => {
-  releaseHeartbeat = resolve;
+  heartbeatResolvers.push(resolve);
 });
 heartbeatTimer.callback();
 await settle();
 const beatsBeforeDispose = globalThis.__touchHeartbeats.length;
+assert.equal(heartbeatResolvers.length, 1, "one heartbeat is in flight before dispose");
+const inFlightRelease = heartbeatResolvers.shift();
 
 dispose();
 
@@ -545,17 +549,32 @@ assert.deepEqual(router.removed, [routePath], "cleanup removes only the touch la
 assert.equal(editorState.isLayoutEditing(), false, "cleanup ends layout editing");
 assert.equal(globalThis.__touchHeartbeats.length, beatsBeforeDispose + 1, "cleanup sends one final heartbeat");
 assert.equal(globalThis.__touchHeartbeats.at(-1), null, "the final heartbeat releases capture");
+assert.equal(heartbeatResolvers.length, 1, "the final heartbeat is still pending on its own request");
 
-releaseHeartbeat({});
-globalThis.__touchHeartbeatResult = () => Promise.resolve({});
-await settle();
-heartbeatTimer.callback();
+// Completing the original in-flight request settles only that request: it
+// appends no heartbeat, and neither does the cleared interval callback.
+inFlightRelease({});
 await settle();
 assert.equal(
   globalThis.__touchHeartbeats.length,
   beatsBeforeDispose + 1,
-  "a late interval callback and an in-flight heartbeat send nothing after cleanup",
+  "settling the pre-dispose heartbeat sends no extra heartbeat",
 );
+const beatsAfterRelease = globalThis.__touchHeartbeats.length;
+heartbeatTimer.callback();
+await settle();
+assert.equal(
+  globalThis.__touchHeartbeats.length,
+  beatsAfterRelease,
+  "the settled in-flight heartbeat and a late interval callback send nothing after cleanup",
+);
+
+// Finally settle the cleanup heartbeat itself; it appends nothing more either.
+for (const resolve of heartbeatResolvers.splice(0)) resolve({});
+globalThis.__touchHeartbeatResult = () => Promise.resolve({});
+await settle();
+assert.equal(globalThis.__touchHeartbeats.length, beatsAfterRelease);
+assert.equal(globalThis.__touchHeartbeats.at(-1), null, "the last heartbeat is still the capture release");
 
 // ---------------------------------------------------------------------------
 // Touch page: key controls and flows

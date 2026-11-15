@@ -8,6 +8,12 @@ started, while a disabled or invalid configuration stays lazy -- nothing is
 started until an explicit enable.  An explicit disable stops this component's
 own child again.
 
+A child that exits without being asked to (for example because the Gamescope
+session took its Xlib connection down) is restarted a bounded number of times
+with a short backoff, so the feature recovers without the user re-toggling it.
+The exit status does not decide that: only this component's own stop (disable,
+shutdown) marks an exit as wanted, and that latch suppresses recovery.
+
 Edge swipes are not a second persisted preference.  The Controller already
 owns the canonical system switches, so the runtime value pushed to the daemon
 is derived from them through :meth:`TouchController.sync_swipe_policy`.
@@ -65,6 +71,15 @@ WRITE_TIMEOUT_SECONDS = 2.0
 STREAM_CLOSE_TIMEOUT_SECONDS = 1.0
 CONTROLS_VISIBLE_TIMEOUT = 2.0
 
+# An unexpected child exit is recovered by the parent instead of waiting for
+# the user to toggle the switch.  The budget is small and the backoff short: a
+# daemon that keeps crashing must settle into "unavailable", not crash-loop.
+MAX_RESTART_ATTEMPTS = 3
+RESTART_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+# A child that ran this long was not a crash loop; its next exit opens a fresh
+# budget instead of spending the one from earlier quick exits.
+STABLE_CHILD_UPTIME_SECONDS = 30.0
+
 MAX_STDOUT_BUFFER = 1024 * 1024
 MAX_STDERR_BUFFER = 8 * 1024
 MAX_LOG_LINE = 500
@@ -93,6 +108,17 @@ class TouchController:
         self._stderr_task = None
         self._wait_task = None
         self._stopping = False
+        # Unexpected-exit recovery: at most one restart runs at a time, the
+        # attempt counter bounds the consecutive quick exits, and the shutdown
+        # latch keeps a stopped plugin from ever spawning a child again.
+        self._restart_task = None
+        # The child whose exit the current or already-scheduled restart covers.
+        # It makes a late duplicate report of the same exit a no-op instead of
+        # a second spawn.
+        self._restart_handled_child = None
+        self._restart_attempts = 0
+        self._child_started_at = None
+        self._shutdown = False
 
     # ------------------------------------------------------------------
     # RPC
@@ -286,9 +312,17 @@ class TouchController:
 
         self._swipe_policy = bool(swipe_enabled) and bool(swipe_in_game)
         self._swipe_policy_known = True
+        # A startup is an explicit enable: it revives a previously shut-down
+        # instance and opens a fresh crash budget.
+        self._shutdown = False
+        self._restart_attempts = 0
+        self._restart_handled_child = None
 
         async with self._ensure_lock():
-            settings, error = self._load_settings()
+            # Reading the file and running the v1 migration touch the disk
+            # (including fsync); run them on a worker thread so the plugin's
+            # timers keep running while the configuration is loaded.
+            settings, error = await asyncio.to_thread(self._load_settings)
             self._settings = self._apply_swipe_policy(settings)
             if error is not None:
                 self._settings_error = error
@@ -338,6 +372,9 @@ class TouchController:
         return self._snapshot()
 
     async def shutdown(self):
+        # Latch before stopping: a restart that was already scheduled must not
+        # spawn a child after the plugin has been torn down.
+        self._shutdown = True
         stopped = await self._stop_child()
         if stopped:
             decky.logger.info("Freedom Touch backend stopped")
@@ -435,7 +472,10 @@ class TouchController:
         canonical = self._apply_swipe_policy(canonical)
         had_error = self._settings_error is not None
 
-        self._persist_settings(canonical)
+        # The atomic replace and its fsync run on a worker thread so a slow
+        # filesystem cannot stall the event loop.  It still finishes before the
+        # new settings are published: persist first, then publish.
+        await asyncio.to_thread(self._persist_settings, canonical)
         self._settings = canonical
         self._settings_error = None
 
@@ -450,7 +490,10 @@ class TouchController:
         # owns; nothing else may keep the touch device grabbed.
         if not canonical["enabled"]:
             exited = True
-            if self._child_running():
+            # A restart waiting out its backoff owns no live process, but it
+            # must still be cancelled and awaited: otherwise it could spawn a
+            # child after the user turned the feature off.
+            if self._child_running() or self._restart_task is not None:
                 exited = await self._stop_child_locked()
             if exited:
                 self._set_status("disabled", "触摸控制已关闭", False)
@@ -464,7 +507,10 @@ class TouchController:
 
         started = False
         if allow_restart and not self._child_running():
-            # One attempt per explicit enable request; no background retry loop.
+            # An explicit start is a fresh attempt at the daemon, so it also
+            # clears a crash budget spent by an earlier crash loop.  Automatic
+            # recovery after an unexpected exit belongs to _restart_child.
+            self._restart_attempts = 0
             # A fresh child receives this canonical settings object itself, so
             # do not push it a second time below.
             started = await self._start_child()
@@ -514,9 +560,21 @@ class TouchController:
         return env
 
     async def _start_child(self):
+        if self._shutdown:
+            # A start that arrives after shutdown must not revive the child.
+            # The saved settings stay on disk for the next startup, but this
+            # instance reports that nothing is running instead of spawning.
+            self._set_status(
+                "unavailable", "插件已关闭，触摸控制器未启动", False
+            )
+            return False
         if self._child_running():
             return True
 
+        # A restart left over from an earlier child is obsolete once someone
+        # starts a child directly (an explicit enable).  The restart task is
+        # exempt: it is the one calling _start_child here.
+        await self._cancel_restart_task()
         await self._dispose_child()
 
         try:
@@ -543,6 +601,7 @@ class TouchController:
 
         self._stopping = False
         self._child = child
+        self._child_started_at = asyncio.get_running_loop().time()
         self._stdout_task = asyncio.create_task(self._read_stdout(child))
         self._stderr_task = asyncio.create_task(self._read_stderr(child))
         self._wait_task = asyncio.create_task(self._wait_child(child))
@@ -587,6 +646,9 @@ class TouchController:
         self._stopping = True
         exited = child is None or child.returncode is not None
         try:
+            # A restart waiting out its backoff owns no live process, but it
+            # must not respawn the child we are about to kill.
+            await self._cancel_restart_task()
             if not exited:
                 try:
                     await self._send_unlocked({"type": "stop"})
@@ -708,16 +770,146 @@ class TouchController:
         except Exception:
             returncode = None
 
-        if self._child is not child or self._stopping:
+        if self._child is not child or self._stopping or self._shutdown:
             return
 
+        # The exit status does not say whether the parent asked for the exit:
+        # a daemon killed by SIGTERM returns 0 just like one that crashed.
+        # _stopping and _shutdown are the only authoritative answers, and both
+        # returned above, so every exit that reaches this point is unexpected.
         if returncode is None:
             detail = "触摸控制器已退出"
         elif returncode == 0:
-            detail = "触摸控制器已停止"
+            detail = "触摸控制器意外退出（退出码 0）"
         else:
-            detail = "触摸控制器已退出（退出码 %s）" % returncode
+            detail = "触摸控制器意外退出（退出码 %s）" % returncode
         self._set_status("unavailable", detail, False)
+
+        # The restart runs in its own task: doing it here would make
+        # _start_child cancel the wait task it is running in.
+        self._schedule_restart(child)
+
+    def _schedule_restart(self, child):
+        if not self._settings["enabled"] or self._settings_error is not None:
+            return
+        if self._stopping or self._shutdown:
+            return
+        if child is self._restart_handled_child:
+            return
+        task = self._restart_task
+        if task is not None and not task.done():
+            # A restart is already running.  If this exit belongs to the
+            # replacement it is still starting, that restart replays the check
+            # in its own finally; dropping it here must not lose it.
+            return
+        self._restart_handled_child = child
+        self._restart_task = asyncio.create_task(self._restart_child(child))
+
+    async def _restart_child(self, child):
+        """Recover one unexpected child exit with a bounded, delayed restart."""
+
+        task = asyncio.current_task()
+        replacement = None
+        try:
+            async with self._ensure_lock():
+                if not self._restart_allowed_locked(child):
+                    return
+
+                started_at = self._child_started_at
+                if (
+                    started_at is not None
+                    and asyncio.get_running_loop().time() - started_at
+                    >= STABLE_CHILD_UPTIME_SECONDS
+                ):
+                    self._restart_attempts = 0
+
+                if self._restart_attempts >= MAX_RESTART_ATTEMPTS:
+                    decky.logger.error(
+                        "Freedom Touch child keeps exiting; auto-restart stopped"
+                    )
+                    self._set_status(
+                        "unavailable",
+                        "触摸控制器连续异常退出，已停止自动重启",
+                        False,
+                    )
+                    return
+
+                index = min(
+                    self._restart_attempts, len(RESTART_BACKOFF_SECONDS) - 1
+                )
+                self._restart_attempts += 1
+                self._set_status(
+                    "starting", "触摸控制器意外退出，正在重新启动…", False
+                )
+                delay = RESTART_BACKOFF_SECONDS[index]
+
+            await asyncio.sleep(delay)
+
+            async with self._ensure_lock():
+                # Disable, shutdown or a replacement child may have happened
+                # while the backoff ran; never bring back a child that is no
+                # longer the current one.
+                if not self._restart_allowed_locked(child):
+                    return
+                # _start_child pushes the persisted canonical settings once and
+                # reports its own spawn/write failure in state; a failed
+                # restart stays visible instead of claiming success.
+                await self._start_child()
+                replacement = self._child
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            decky.logger.error("Freedom Touch restart failed: %s", exc)
+            self._set_status("error", "触摸控制器重启失败：%s" % exc, False)
+        finally:
+            if self._restart_task is task:
+                self._restart_task = None
+            self._recover_exit_that_arrived_during_start(replacement)
+
+    def _recover_exit_that_arrived_during_start(self, replacement):
+        """Schedule the next retry when the replacement died while starting.
+
+        A replacement can exit before _start_child finishes writing its
+        initial settings, and its _wait_child report is dropped because this
+        restart still owns _restart_task.  Replaying the same decision here,
+        after the ownership was released, keeps that exit from disappearing;
+        the identity check excludes the child this restart replaced, and
+        _schedule_restart ignores a child already covered, so the report and
+        this check can never start two children.
+        """
+
+        if replacement is None or replacement is not self._child:
+            return
+        if replacement.returncode is None:
+            return
+        self._schedule_restart(replacement)
+
+    def _restart_allowed_locked(self, child):
+        return (
+            self._child is child
+            and not self._stopping
+            and not self._shutdown
+            and self._settings["enabled"]
+            and self._settings_error is None
+        )
+
+    async def _cancel_restart_task(self):
+        """Cancel a scheduled restart and wait for it to unwind.
+
+        Called with the controller lock held, so the restart task can never be
+        holding it: the cancellation lands in its sleep or its own lock wait and
+        the gather returns without waiting on us.  The task that is calling this
+        (a restart reaching _start_child) is left alone.
+        """
+
+        task = self._restart_task
+        if task is None or task is asyncio.current_task():
+            return
+        self._restart_task = None
+        if task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def _read_stdout(self, child):
         stream = child.stdout
