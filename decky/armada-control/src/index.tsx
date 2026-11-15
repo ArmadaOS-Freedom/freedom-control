@@ -14,6 +14,7 @@ import { registerLowPowerDownloadEntry } from "./lib/lowPowerDownloads";
 import { factoryDefaultTransition } from "./lib/protonPolicy";
 import { installY700FrameRateChoices } from "./lib/y700FrameRateChoices";
 import { registerSteamProfileLocalization } from "./lib/steamProfileLocalization";
+import { installSystemInfoCpuNameFallback } from "./lib/steamSystemInfo";
 import { registerTouchController } from "./touch/integration";
 
 // Gamescope's edge swipes toggle the Steam menus, so a drag inside an open
@@ -45,6 +46,7 @@ export default definePlugin(() => {
   });
   let unregisterDownloadWatcher = () => {};
   let disposeFrameRateChoices = () => {};
+  let disposeSystemInfo = () => {};
   const unregisterProfileLocalization = registerSteamProfileLocalization();
   const unregisterLowPowerDownloads = registerLowPowerDownloadEntry();
   const stopWatchingSideMenus = watchSideMenus();
@@ -58,7 +60,25 @@ export default definePlugin(() => {
   const handledRequest = getCompatApplied()
     .then((state) => ({ state, loaded: true }))
     .catch(() => ({ state: { appids: [] as string[], protonDefault: "" }, loaded: false }));
-  Promise.all([getConfig(), getInstalledGames(), handledRequest])
+  // The CPU name display depends only on the device class, so it installs as
+  // soon as the config arrives instead of waiting on the installed-games RPC.
+  const configRequest = getConfig();
+  configRequest
+    .then(async (config) => {
+      await (window as any).App.WaitForServicesInitialized();
+      if (cancelled) return;
+      try {
+        disposeSystemInfo = installSystemInfoCpuNameFallback(config.cpuDeviceClass);
+        if (cancelled) {
+          disposeSystemInfo();
+          disposeSystemInfo = () => {};
+        }
+      } catch (error) {
+        console.warn("[armada-control] CPU name display fallback failed to install", error);
+      }
+    })
+    .catch(() => {});
+  Promise.all([configRequest, getInstalledGames(), handledRequest])
     .then(async ([config, games, handled]) => {
       await (window as any).App.WaitForServicesInitialized();
       if (cancelled) return;
@@ -125,6 +145,7 @@ export default definePlugin(() => {
       });
       unregisterDownloadWatcher();
       disposeFrameRateChoices();
+      disposeSystemInfo();
       unregisterProfileLocalization();
       unregisterLowPowerDownloads();
       stopWatchingSideMenus();
