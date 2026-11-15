@@ -604,6 +604,131 @@ class FrameAccumulatorTests(unittest.TestCase):
             [("begin", 9, 1, 2)],
         )
 
+    def feed_on(self, accumulator, *events):
+        result = []
+        for event_type, code, value in events:
+            result.extend(accumulator.consume(event_type, code, value))
+        return result
+
+    def test_clone_positions_copies_the_slot_cache_without_contacts(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        clone = self.accumulator.clone_positions()
+
+        # The old contact is not inherited: a bare report emits nothing and
+        # releasing its tracking id is not the clone's to end.
+        self.assertEqual(self.feed_on(clone, (EV_SYN, SYN_REPORT, 0)), [])
+        self.assertEqual(
+            self.feed_on(clone, *self.release(0), (EV_SYN, SYN_REPORT, 0)), []
+        )
+
+        # A new tracking id on the cached slot begins at the inherited point.
+        self.assertEqual(
+            self.feed_on(clone, *self.press(0, 9), (EV_SYN, SYN_REPORT, 0)),
+            [("begin", 9, 10, 11)],
+        )
+
+    def test_clone_positions_keeps_the_current_slot_number(self):
+        self.feed(*self.axes(3, x=30, y=31), (EV_SYN, SYN_REPORT, 0))
+        clone = self.accumulator.clone_positions()
+
+        self.assertEqual(
+            self.feed_on(clone, (EV_ABS, MT_TRACKING_ID, 4)),
+            [],
+        )
+        self.assertEqual(
+            self.feed_on(clone, (EV_SYN, SYN_REPORT, 0)),
+            [("begin", 4, 30, 31)],
+        )
+
+    def test_clone_positions_shares_no_state_with_the_source(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        clone = self.accumulator.clone_positions()
+
+        # Moving the clone's slot must not move the source's cached point...
+        self.assertEqual(
+            self.feed_on(clone, *self.press(0, 6), (EV_SYN, SYN_REPORT, 0)),
+            [("begin", 6, 10, 11)],
+        )
+        self.assertEqual(
+            self.feed_on(
+                clone, *self.axes(0, x=99, y=98), (EV_SYN, SYN_REPORT, 0)
+            ),
+            [("move", 6, 99, 98)],
+        )
+        # ...and the source's later press still uses its own position.
+        self.assertEqual(
+            self.feed(*self.release(0), (EV_SYN, SYN_REPORT, 0)),
+            [("end", 5, None, None)],
+        )
+        self.assertEqual(
+            self.feed(*self.press(0, 7), (EV_SYN, SYN_REPORT, 0)),
+            [("begin", 7, 10, 11)],
+        )
+
+    def test_clone_positions_inside_a_dropped_window_stays_dropped(self):
+        self.feed(*self.begin(0, 5, 10, 11))
+        self.feed((EV_SYN, SYN_DROPPED, 0))
+        clone = self.accumulator.clone_positions()
+
+        # A clone taken inside the dropped window has no cached coordinates
+        # and is still ignoring events: the dropped frame's tail may not begin
+        # a contact even when it carries a complete point.
+        self.assertEqual(
+            self.feed_on(
+                clone,
+                *self.press(0, 8),
+                *self.axes(0, x=1, y=2),
+                (EV_SYN, SYN_REPORT, 0),
+            ),
+            [],
+        )
+        # Only the frame after that SYN_REPORT starts a gesture.
+        self.assertEqual(
+            self.feed_on(
+                clone,
+                *self.press(0, 9),
+                *self.axes(0, x=3, y=4),
+                (EV_SYN, SYN_REPORT, 0),
+            ),
+            [("begin", 9, 3, 4)],
+        )
+
+    def test_seed_positions_loads_coordinates_without_a_contact(self):
+        frame = FrameAccumulator()
+        frame.seed_positions({0: {"x": 10, "y": 11}}, 0)
+
+        self.assertEqual(frame.consume(EV_SYN, SYN_REPORT, 0), [])
+        self.assertEqual(
+            self.feed_on(
+                frame, (EV_ABS, MT_TRACKING_ID, 5), (EV_SYN, SYN_REPORT, 0)
+            ),
+            [("begin", 5, 10, 11)],
+        )
+
+    def test_seed_positions_keeps_partial_axes_unknown(self):
+        frame = FrameAccumulator()
+        frame.seed_positions({0: {"x": 10, "y": None}}, 0)
+
+        # The seeded slot knows only X, so a begin still waits for Y.
+        self.assertEqual(
+            self.feed_on(frame, *self.press(0, 5), (EV_SYN, SYN_REPORT, 0)), []
+        )
+        self.assertEqual(
+            self.feed_on(frame, *self.axes(0, y=12), (EV_SYN, SYN_REPORT, 0)),
+            [("begin", 5, 10, 12)],
+        )
+
+    def test_seed_positions_uses_the_given_current_slot(self):
+        frame = FrameAccumulator()
+        frame.seed_positions({2: {"x": 7, "y": 8}}, 2)
+
+        self.assertEqual(
+            self.feed_on(
+                frame, (EV_ABS, MT_TRACKING_ID, 6), (EV_SYN, SYN_REPORT, 0)
+            ),
+            [("begin", 6, 7, 8)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

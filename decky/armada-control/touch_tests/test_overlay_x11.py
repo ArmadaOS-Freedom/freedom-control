@@ -610,14 +610,23 @@ def test_overlay_maps_click_through_hides_and_restores_under_x11():
 
             _assert_click_through(overlay, window_id)
 
+            # The marker atom is already 1 from the first mapped payload, so
+            # polling it cannot order a later update.  Synchronise on real map
+            # state instead: hide first and wait for the actual unmap, which
+            # proves the overlay consumed the preceding queue.
+            before_chrome = dict(message)
+            before_chrome["visible"] = False
+            overlay.send(before_chrome)
+            _assert_unmapped(overlay, window_id)
+
             # Expanded chrome is visual only: the pill must not open an input
-            # region or change the click-through shape.
+            # region or change the click-through shape.  Mapping again is the
+            # barrier that proves this visible/chrome payload was processed.
             expanded_chrome = dict(message)
             expanded_chrome["chrome"] = True
             overlay.send(expanded_chrome)
-            if _poll_until(
-                lambda: _atom_value(window_id) == 1, WINDOW_TIMEOUT
-            ) is None:
+            _find_mapped_window(overlay, window_id)
+            if _atom_value(window_id) != 1:
                 raise overlay.failure(
                     "overlay lost its marker after chrome was enabled"
                 )

@@ -196,9 +196,22 @@ class InputSink:
 
         if touching:
             self._pads[side] = (x, y)
-        else:
+        self._send_touch(cap, touching, pressure, x, y)
+        if not touching:
+            # Only forget the contact once the bridge accepted the release;
+            # a failed release stays recorded so neutralize() can retry it.
             self._pads.pop(side, None)
-        self.bridge.send_touch(cap, 0, touching, pressure, x, y)
+
+    def _send_touch(self, cap, touching, pressure, x, y):
+        """Send one contact and treat an explicit ``False`` reply as failure.
+
+        ``None`` keeps the older test-double contract and counts as success.
+        A raised exception propagates unchanged.  Either way the runtime sees
+        a failure and takes its existing device-recovery path.
+        """
+
+        if self.bridge.send_touch(cap, 0, touching, pressure, x, y) is False:
+            raise RuntimeError("touch send failed for %s" % (cap,))
 
     def _flush(self, pending):
         changed = False
@@ -229,8 +242,32 @@ class InputSink:
         """Release every held control and return to a neutral state.
 
         The method is idempotent: once state is clear it performs no writes,
-        bridge calls, or SYN.
+        bridge calls, or SYN.  A contact is only forgotten after the bridge
+        accepted its release, so a failed release is retried by the next
+        call.  Buttons and axes are released even when a pad release fails;
+        the pad failure is reported afterwards, as ``RuntimeError`` for an
+        explicit ``False`` or unchanged for a raised bridge exception, so the
+        runtime can recover.
         """
+
+        failure = None
+        for side in ("left", "right"):
+            position = self._pads.get(side)
+            if position is None:
+                continue
+            try:
+                self._send_touch(
+                    PAD_MOTION_CAPS[side],
+                    False,
+                    0.0,
+                    position[0],
+                    position[1],
+                )
+            except Exception as exc:
+                if failure is None:
+                    failure = exc
+            else:
+                self._pads.pop(side, None)
 
         pending = {}
         for code in sorted(self._buttons):
@@ -238,19 +275,16 @@ class InputSink:
         for code in sorted(self._axes):
             pending[(EV_ABS, code)] = 0
 
-        for side in ("left", "right"):
-            position = self._pads.pop(side, None)
-            if position is not None:
-                cap = PAD_MOTION_CAPS[side]
-                self.bridge.send_touch(
-                    cap, 0, False, 0.0, position[0], position[1]
-                )
-
         if pending:
             self._flush(pending)
         self._buttons.clear()
         self._axes.clear()
-        self._pads.clear()
+
+        if failure is not None:
+            # An explicit False already surfaced as RuntimeError; a bridge
+            # exception is re-raised unchanged.  Either one reaches the
+            # runtime's existing device-recovery path.
+            raise failure
 
     def close(self):
         try:

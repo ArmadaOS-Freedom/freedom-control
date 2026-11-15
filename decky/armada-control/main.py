@@ -40,6 +40,10 @@ class Plugin:
         self._home_power = HomePower()
         self._tf = TfLibraryService()
         self._touch = TouchController()
+        # The canonical swipe-switch reads and the touch update they feed are
+        # one critical section: without it two overlapping RPCs (or startup and
+        # an RPC) could apply the older of two policies last.
+        self._touch_policy_lock = asyncio.Lock()
 
     async def _main(self):
         try:
@@ -48,9 +52,13 @@ class Plugin:
             logger.exception("Failed to apply the saved Steam UI power preference")
 
         try:
-            enabled = await asyncio.to_thread(swipe_gestures_enabled)
-            in_game = await asyncio.to_thread(swipe_gestures_in_game_enabled)
-            await self._touch.startup(enabled, in_game)
+            # Startup applies the switches it reads while holding the same lock
+            # as the RPC path, so a newer preference can never be overwritten
+            # by the saved state loaded here.
+            async with self._touch_policy_lock:
+                enabled = await asyncio.to_thread(swipe_gestures_enabled)
+                in_game = await asyncio.to_thread(swipe_gestures_in_game_enabled)
+                await self._touch.startup(enabled, in_game)
         except Exception:
             logger.exception("Failed to load the saved touch controller state")
 
@@ -128,13 +136,17 @@ class Plugin:
 
     async def _sync_touch_swipe_policy(self):
         # The Controller's canonical switches are the only edge-swipe
-        # preference; the touch runtime derives its own value from them.
-        try:
-            enabled = await asyncio.to_thread(swipe_gestures_enabled)
-            in_game = await asyncio.to_thread(swipe_gestures_in_game_enabled)
-            await self._touch.sync_swipe_policy(enabled, in_game)
-        except Exception:
-            logger.exception("Failed to apply the touch swipe policy")
+        # preference; the touch runtime derives its own value from them.  Both
+        # reads and the apply form one critical section, so an RPC that read
+        # the switches later can never be overwritten by an RPC that read them
+        # earlier.
+        async with self._touch_policy_lock:
+            try:
+                enabled = await asyncio.to_thread(swipe_gestures_enabled)
+                in_game = await asyncio.to_thread(swipe_gestures_in_game_enabled)
+                await self._touch.sync_swipe_policy(enabled, in_game)
+            except Exception:
+                logger.exception("Failed to apply the touch swipe policy")
 
     async def suspend_swipe_gestures(self, suspended):
         return await asyncio.to_thread(suspend_swipe_gestures, suspended)

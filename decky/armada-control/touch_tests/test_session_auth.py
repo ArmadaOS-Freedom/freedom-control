@@ -17,6 +17,11 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 
 from py_modules.freedom_touch import session  # noqa: E402
 
+try:
+    import fcntl
+except ImportError:  # The deployed systems are Linux; authoring may not be.
+    fcntl = None
+
 
 class EffectiveUid:
     """Mutable effective uid with a record of every switch."""
@@ -245,6 +250,102 @@ class FocusMonitorAuthTests(unittest.TestCase):
 
         self.assertEqual(x11.effective_uids, [0])
         self.assertEqual(state.switches, [])
+
+
+class SnapshotTouch:
+    """Only the calls a slot snapshot makes on a real evdev device."""
+
+    def __init__(self, slots=3, current=2, minimum=0, fd=5):
+        self.slots = slots
+        self.current = current
+        self.minimum = minimum
+        self.fd = fd
+        self.codes = []
+
+    def fileno(self):
+        return self.fd
+
+    def absinfo(self, code):
+        self.codes.append(code)
+        return types.SimpleNamespace(
+            min=self.minimum, max=self.slots - 1, value=self.current
+        )
+
+
+MT_SLOT = 47
+MT_POSITION_X = 53
+MT_POSITION_Y = 54
+
+
+@unittest.skipUnless(fcntl is not None, "fcntl is Linux-only")
+class TouchSlotSnapshotTests(unittest.TestCase):
+    def test_reads_both_axes_for_every_slot(self):
+        calls = []
+
+        def fake_ioctl(fd, request, buffer, mutate=True):
+            calls.append((fd, request, buffer[0], len(buffer)))
+            base = 100 if buffer[0] == MT_POSITION_X else 200
+            for index in range(1, len(buffer)):
+                buffer[index] = base + index
+            return 0
+
+        touch = SnapshotTouch(slots=3, current=2)
+        with mock.patch.object(fcntl, "ioctl", side_effect=fake_ioctl):
+            result = session.touch_slot_snapshot(touch)
+
+        self.assertIsNotNone(result)
+        positions, current = result
+        self.assertEqual(current, 2)
+        self.assertEqual(
+            positions,
+            {
+                0: {"x": 101, "y": 201},
+                1: {"x": 102, "y": 202},
+                2: {"x": 103, "y": 203},
+            },
+        )
+        # _IOC(_IOC_READ, 'E', 0x0a, (num_slots + 1) * 4) with one code word.
+        length = (3 + 1) * 4
+        request = (2 << 30) | (length << 16) | (ord("E") << 8) | 0x0A
+        self.assertEqual(
+            [call[1:] for call in calls],
+            [
+                (request, MT_POSITION_X, length // 4),
+                (request, MT_POSITION_Y, length // 4),
+            ],
+        )
+        self.assertEqual([call[0] for call in calls], [touch.fd, touch.fd])
+        self.assertEqual(touch.codes, [MT_SLOT])
+
+    def test_a_rejected_ioctl_yields_no_snapshot(self):
+        with mock.patch.object(
+            fcntl, "ioctl", side_effect=OSError(25, "inappropriate ioctl")
+        ):
+            self.assertIsNone(session.touch_slot_snapshot(SnapshotTouch()))
+
+    def test_implausible_slot_tables_are_refused_without_an_ioctl(self):
+        cases = [
+            SnapshotTouch(slots=0, current=0),
+            SnapshotTouch(slots=3, current=3),
+            SnapshotTouch(slots=3, minimum=1),
+            SnapshotTouch(slots=4096, current=0),
+        ]
+        ioctl = mock.Mock()
+        with mock.patch.object(fcntl, "ioctl", ioctl):
+            for touch in cases:
+                with self.subTest(touch=touch):
+                    self.assertIsNone(session.touch_slot_snapshot(touch))
+        ioctl.assert_not_called()
+
+    def test_missing_slot_absinfo_yields_no_snapshot(self):
+        class NoSlotInfo(SnapshotTouch):
+            def absinfo(self, _code):
+                raise OSError(22, "invalid argument")
+
+        ioctl = mock.Mock()
+        with mock.patch.object(fcntl, "ioctl", ioctl):
+            self.assertIsNone(session.touch_slot_snapshot(NoSlotInfo()))
+        ioctl.assert_not_called()
 
 
 if __name__ == "__main__":

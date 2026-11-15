@@ -236,6 +236,46 @@ class TouchEngineTests(unittest.TestCase):
         self.assertTrue(moved_pad)
         self.assertGreater(moved_pad[-1]["x"], 0.5)
 
+    def test_overlapping_pad_and_button_hit_the_button_in_either_order(self):
+        # draw_controls paints pads first and every other control afterwards,
+        # so a button sits on top of a pad regardless of layout position.
+        pad = control("pad_l", "pad", 0.10, 0.10, 0.40, 0.40, "left")
+        btn = control("btn_a", "button", 0.20, 0.20, 0.10, 0.10, "a")
+        for layout in ([pad, btn], [btn, pad]):
+            with self.subTest(order=[item["id"] for item in layout]):
+                engine = TouchEngine([dict(item) for item in layout])
+                engine.set_active(True)
+                self.assertEqual(
+                    engine.begin(1, 0.25, 0.25, 0.0),
+                    [("button", "a", True)],
+                )
+
+    def test_same_kind_overlap_hits_the_control_drawn_last(self):
+        first = control("btn_a", "button", 0.10, 0.10, 0.20, 0.20, "a")
+        last = control("btn_b", "button", 0.15, 0.15, 0.20, 0.20, "b")
+        for layout, expected in (([first, last], "b"), ([last, first], "a")):
+            with self.subTest(expected=expected):
+                engine = TouchEngine([dict(item) for item in layout])
+                engine.set_active(True)
+                self.assertEqual(
+                    engine.begin(1, 0.18, 0.18, 0.0),
+                    [("button", expected, True)],
+                )
+
+        left = control("pad_l", "pad", 0.30, 0.30, 0.30, 0.30, "left")
+        right = control("pad_r", "pad", 0.35, 0.35, 0.30, 0.30, "right")
+        for layout, expected in (
+            ([left, right], "right"),
+            ([right, left], "left"),
+        ):
+            with self.subTest(expected=expected):
+                engine = TouchEngine([dict(item) for item in layout])
+                engine.set_active(True)
+                self.assertEqual(
+                    [event[1] for event in engine.begin(1, 0.40, 0.40, 0.0)],
+                    [expected],
+                )
+
     def test_cancel_and_deactivate_release_everything(self):
         engine = self.active_engine()
         engine.begin(1, self.A[0], self.A[1], 0.0)

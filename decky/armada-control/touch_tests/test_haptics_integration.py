@@ -24,6 +24,7 @@ from test_daemon_lifecycle import (  # noqa: E402
     MT_TRACKING_ID,
     SYN_REPORT,
     FakeEvent,
+    FakeHaptics,
     Harness,
 )
 from test_collapse_daemon import (  # noqa: E402
@@ -46,6 +47,27 @@ def _begin_at(harness, pointer, slot, x, y):
     )
     harness.now += 0.02
     harness.daemon.tick(harness.now)
+
+
+class ColdFakeHaptics(FakeHaptics):
+    """Motor adapter that owns no node until a refresh discovers one.
+
+    The real adapter starts with an empty node table, so ``available`` is
+    False until ``refresh()`` opens the two physical devices.  The shared
+    fake reports available from construction, which would hide a daemon that
+    never refreshes at startup.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.available = False
+        self.detail = "机身振动暂不可用"
+
+    def refresh(self, now):
+        super().refresh(now)
+        self.available = True
+        self.detail = "机身振动已就绪"
+        return self.available
 
 
 class HapticsSettingsTests(unittest.TestCase):
@@ -267,6 +289,29 @@ class DaemonHapticsTests(unittest.TestCase):
         harness.now = base_now + 5.01
         harness.daemon.tick(harness.now)
         self.assertEqual(len(haptics.refreshed), baseline + 1)
+
+    def test_first_poll_discovers_before_the_first_five_second_window(self):
+        harness = Harness()
+        harness.haptics = ColdFakeHaptics()
+        harness.activate()
+
+        haptics = harness.haptics
+        first = harness.now
+        # The creating tick must already have discovered the nodes; otherwise
+        # the UI reports "unavailable" for a full refresh interval.
+        self.assertEqual(haptics.refreshed, [first])
+        self.assertTrue(haptics.available)
+        self.assertIs(
+            harness.status_lines()[-1]["status"]["haptics_available"], True
+        )
+
+        harness.now = first + 4.9
+        harness.daemon.tick(harness.now)
+        self.assertEqual(haptics.refreshed, [first])
+
+        harness.now = first + 5.0
+        harness.daemon.tick(harness.now)
+        self.assertEqual(haptics.refreshed, [first, first + 5.0])
 
     def test_unavailable_is_reported_but_never_blocks_capture(self):
         harness = Harness()

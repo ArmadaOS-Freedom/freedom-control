@@ -902,6 +902,161 @@ def test_stop_cancels_tasks_and_closes_stdin(plugin):
     assert plugin._wait_task is None
 
 
+class _HangingStdin(_FakeStdin):
+    """Fake stdin whose drain never completes: the pipe is never readable."""
+
+    def __init__(self):
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def drain(self):
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+class _StuckChild(_FakeChild):
+    """Process that only exits after the controller escalates the signal."""
+
+    def __init__(self):
+        super().__init__(returncode=None)
+        self.stdin = _HangingStdin()
+        self.exited = asyncio.Event()
+        self.terminated = False
+        self.killed = False
+
+    async def wait(self):
+        await self.exited.wait()
+        return self.returncode
+
+    def terminate(self):
+        super().terminate()
+        self.terminated = True
+        self.exited.set()
+
+    def kill(self):
+        super().kill()
+        self.killed = True
+        self.exited.set()
+
+
+class _UnkillableChild(_StuckChild):
+    """Process that ignores both SIGTERM and SIGKILL."""
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+
+
+def _patch_child_timeouts(monkeypatch):
+    # The write and stream-close bounds are the behaviour under test, so they
+    # stay optional: an implementation without them must fail on the real
+    # endless wait (caught by the outer timeout), not on a missing attribute.
+    monkeypatch.setattr(
+        controller_module, "WRITE_TIMEOUT_SECONDS", 0.01, raising=False
+    )
+    monkeypatch.setattr(controller_module, "STOP_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(controller_module, "TERMINATE_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(
+        controller_module, "STREAM_CLOSE_TIMEOUT_SECONDS", 0.01, raising=False
+    )
+
+
+@pytest.mark.parametrize("entry", ["disable", "shutdown"])
+def test_stuck_write_is_bounded_and_reclaims_the_owned_child(
+    plugin, monkeypatch, entry
+):
+    _patch_child_timeouts(monkeypatch)
+
+    async def scenario():
+        await _start(plugin)
+        child = _StuckChild()
+        plugin._child = child
+        plugin._settings = controller_module.validate_settings({"enabled": True})
+        if entry == "disable":
+            return child, await plugin.update_options({"enabled": False})
+
+        await plugin.shutdown()
+        return child, None
+
+    child, state = asyncio.run(asyncio.wait_for(scenario(), 1.0))
+
+    # The stop write was attempted, timed out, and the child was reclaimed
+    # through terminate instead of an endless write or an endless close.
+    assert json.loads(child.stdin.data.decode("utf-8")) == {"type": "stop"}
+    assert child.terminated is True
+    assert plugin._child is None
+    if entry == "disable":
+        assert state["settings"]["enabled"] is False
+        assert state["status"]["state"] == "disabled"
+
+
+def test_surviving_child_keeps_its_handle_and_is_not_reported_stopped(
+    plugin, monkeypatch
+):
+    _patch_child_timeouts(monkeypatch)
+
+    async def scenario():
+        await _start(plugin)
+        child = _UnkillableChild()
+        plugin._child = child
+        plugin._settings = controller_module.validate_settings({"enabled": True})
+        return child, await plugin.update_options({"enabled": False})
+
+    child, state = asyncio.run(asyncio.wait_for(scenario(), 1.0))
+
+    assert child.terminated is True
+    assert child.killed is True
+    # The only reaper stays reachable for a later retry.
+    assert plugin._child is child
+    assert state["status"]["state"] == "unavailable"
+    assert "未退出" in state["status"]["detail"]
+
+
+class _StuckCloseStdin(_FakeStdin):
+    """Fake stdin whose close handshake never finishes."""
+
+    def __init__(self):
+        super().__init__()
+        self.close_entered = asyncio.Event()
+
+    async def wait_closed(self):
+        self.close_entered.set()
+        await asyncio.Event().wait()
+
+
+def test_stuck_close_still_releases_the_child(plugin, monkeypatch):
+    _patch_child_timeouts(monkeypatch)
+
+    async def stopped():
+        await _start(plugin)
+        child = _FakeChild(returncode=0)
+        child.stdin = _StuckCloseStdin()
+        plugin._child = child
+        await plugin._stop_child()
+        return child
+
+    stopped_child = asyncio.run(asyncio.wait_for(stopped(), 1.0))
+
+    assert stopped_child.stdin.close_entered.is_set()
+    assert stopped_child.stdin.closed is True
+    assert plugin._child is None
+
+    async def disposed():
+        child = _FakeChild(returncode=0)
+        child.stdin = _StuckCloseStdin()
+        plugin._child = child
+        await plugin._dispose_child()
+        return child
+
+    disposed_child = asyncio.run(asyncio.wait_for(disposed(), 1.0))
+
+    assert disposed_child.stdin.close_entered.is_set()
+    assert disposed_child.stdin.closed is True
+    assert plugin._child is None
+
+
 def test_startup_pushes_persisted_enabled_settings_exactly_once(
     plugin, tmp_path, monkeypatch
 ):

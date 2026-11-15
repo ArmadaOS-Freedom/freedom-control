@@ -579,7 +579,11 @@ class Daemon:
             self.haptics = None
             self._log("cannot create haptics adapter: %s" % (exc,))
             return
-        self._last_haptics_refresh = self._now()
+        # A freshly created adapter owns no motor node at all: availability
+        # is only decided by refresh().  Mark the next poll as already due so
+        # the first discovery happens on this tick instead of five seconds
+        # later, and only subsequent polls keep the regular cadence.
+        self._last_haptics_refresh = -math.inf
 
     def _poll_haptics(self, now):
         haptics = self.haptics
@@ -834,7 +838,7 @@ class Daemon:
             self._absinfo = (abs_x, abs_y)
             self._contacts.clear()
             self._native_contacts.clear()
-            self._contact_frame = FrameAccumulator()
+            self._contact_frame = self._opened_contact_frame(touch)
             self.aspect_ratio = self._compute_aspect_ratio()
             self._reset_passive("touch opened")
             if self.engine is not None:
@@ -849,6 +853,22 @@ class Daemon:
                     touch.close()
                 except Exception:
                     pass
+
+    def _opened_contact_frame(self, touch):
+        """Return a passive frame seeded from a read-only slot snapshot.
+
+        Opening the device is not a touch: the snapshot only fills the per-slot
+        coordinates and the current slot, so a finger that is already on the
+        panel keeps its point without becoming a contact.  The first gesture
+        still needs its own TRACKING_ID.  When the ioctl is unsupported the
+        frame stays empty and a begin simply waits for complete coordinates.
+        """
+
+        frame = FrameAccumulator()
+        snapshot = session.touch_slot_snapshot(touch)
+        if snapshot is not None:
+            frame.seed_positions(*snapshot)
+        return frame
 
     def _compute_aspect_ratio(self):
         """Return the rotated screen width/height ratio of the touch panel."""
@@ -1172,8 +1192,11 @@ class Daemon:
             return
 
         # Ignore any contact that was already down at grab time; only a new
-        # TRACKING_ID may start a gesture.
-        self.frame = FrameAccumulator()
+        # TRACKING_ID may start a gesture.  The passive frame's cached slot
+        # coordinates are inherited, so the first press after a menu (or after
+        # a release) still begins at the point the slot already holds even
+        # when it reports a single axis or no coordinates at all.
+        self.frame = self._contact_frame.clone_positions()
         self.engine.set_active(True)
         self.capturing = True
         self.collapsed = False

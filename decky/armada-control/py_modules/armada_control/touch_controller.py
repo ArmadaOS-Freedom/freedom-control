@@ -59,6 +59,10 @@ OPTION_KEYS = frozenset(
 
 STOP_WAIT_SECONDS = 3.0
 TERMINATE_WAIT_SECONDS = 2.0
+# A daemon that stopped reading its pipe must not hold the controller lock
+# forever: the write and the stream close are both bounded.
+WRITE_TIMEOUT_SECONDS = 2.0
+STREAM_CLOSE_TIMEOUT_SECONDS = 1.0
 CONTROLS_VISIBLE_TIMEOUT = 2.0
 
 MAX_STDOUT_BUFFER = 1024 * 1024
@@ -334,8 +338,15 @@ class TouchController:
         return self._snapshot()
 
     async def shutdown(self):
-        await self._stop_child()
-        decky.logger.info("Freedom Touch backend stopped")
+        stopped = await self._stop_child()
+        if stopped:
+            decky.logger.info("Freedom Touch backend stopped")
+        else:
+            # The child survived SIGKILL; _stop_child kept its handle.  Never
+            # claim a stop that did not happen.
+            decky.logger.warning(
+                "Freedom Touch backend still running after shutdown"
+            )
 
     # ------------------------------------------------------------------
     # Settings
@@ -438,9 +449,17 @@ class TouchController:
         # An explicit disable releases input and stops the daemon this plugin
         # owns; nothing else may keep the touch device grabbed.
         if not canonical["enabled"]:
+            exited = True
             if self._child_running():
-                await self._stop_child_locked()
-            self._set_status("disabled", "触摸控制已关闭", False)
+                exited = await self._stop_child_locked()
+            if exited:
+                self._set_status("disabled", "触摸控制已关闭", False)
+            else:
+                # The handle is kept for a later retry; claiming "disabled"
+                # here would report an exit that never happened.
+                self._set_status(
+                    "unavailable", "无法停止触摸控制器：进程未退出", False
+                )
             return self._snapshot()
 
         started = False
@@ -553,45 +572,30 @@ class TouchController:
 
     async def _stop_child(self):
         async with self._ensure_lock():
-            await self._stop_child_locked()
+            return await self._stop_child_locked()
 
     async def _stop_child_locked(self):
+        """Stop the owned child; return True once the process is gone.
+
+        Every wait is bounded, so a full stdin pipe or a process that ignores
+        SIGKILL cannot hold the controller lock forever.  A child that survives
+        the bounded kill wait keeps its handle: dropping it would leave the only
+        reaper behind and would claim an exit that never happened.
+        """
+
         child = self._child
         self._stopping = True
+        exited = child is None or child.returncode is not None
         try:
-            if child is not None and child.returncode is None:
+            if not exited:
                 try:
                     await self._send_unlocked({"type": "stop"})
                 except Exception:
+                    # A failed stop write is not a reason to keep writing; fall
+                    # through to the existing wait/terminate/kill recovery.
                     pass
 
-                try:
-                    await asyncio.wait_for(
-                        child.wait(), STOP_WAIT_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    try:
-                        child.terminate()
-                    except ProcessLookupError:
-                        pass
-                    except Exception:
-                        pass
-
-                    try:
-                        await asyncio.wait_for(
-                            child.wait(), TERMINATE_WAIT_SECONDS
-                        )
-                    except asyncio.TimeoutError:
-                        try:
-                            child.kill()
-                        except ProcessLookupError:
-                            pass
-                        except Exception:
-                            pass
-                        try:
-                            await child.wait()
-                        except Exception:
-                            pass
+                exited = await self._reap_child(child)
         finally:
             await self._cancel_child_tasks()
             if child is not None and child.stdin is not None:
@@ -600,11 +604,41 @@ class TouchController:
                 except Exception:
                     pass
                 try:
-                    await child.stdin.wait_closed()
+                    await asyncio.wait_for(
+                        child.stdin.wait_closed(), STREAM_CLOSE_TIMEOUT_SECONDS
+                    )
                 except Exception:
                     pass
-            self._child = None
+            if exited:
+                self._child = None
+            else:
+                decky.logger.error(
+                    "Freedom Touch child survived SIGKILL; keeping its handle"
+                )
             self._stopping = False
+        return exited
+
+    @staticmethod
+    async def _reap_child(child):
+        """Escalate stop → terminate → kill, keeping every wait bounded."""
+
+        try:
+            await asyncio.wait_for(child.wait(), STOP_WAIT_SECONDS)
+            return True
+        except asyncio.TimeoutError:
+            pass
+
+        for escalate in (child.terminate, child.kill):
+            try:
+                escalate()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(child.wait(), TERMINATE_WAIT_SECONDS)
+                return True
+            except asyncio.TimeoutError:
+                continue
+        return False
 
     async def _dispose_child(self):
         child = self._child
@@ -612,7 +646,12 @@ class TouchController:
         if child is not None and child.stdin is not None:
             try:
                 child.stdin.close()
-                await child.stdin.wait_closed()
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(
+                    child.stdin.wait_closed(), STREAM_CLOSE_TIMEOUT_SECONDS
+                )
             except Exception:
                 pass
         self._child = None
@@ -649,7 +688,17 @@ class TouchController:
             message, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8") + b"\n"
         child.stdin.write(data)
-        await child.stdin.drain()
+        try:
+            await asyncio.wait_for(
+                child.stdin.drain(), WRITE_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            # The pipe stayed full: report it like any other write failure so
+            # the caller's existing error path runs instead of blocking the
+            # controller lock on a daemon that stopped reading.
+            raise RuntimeError(
+                "触摸控制器写入超时（%s 秒）" % WRITE_TIMEOUT_SECONDS
+            ) from None
 
     async def _wait_child(self, child):
         try:

@@ -96,6 +96,12 @@ export function TouchContent({ locale }: { locale: Language }) {
   const busyRef = useRef(false);
   const previewingRef = useRef(false);
   const pendingOptionsRef = useRef<OptionsPatch | null>(null);
+  // The tab switch unmounts this page; work awaited by the old instance must
+  // never publish state or send another patch afterwards.
+  const aliveRef = useRef(true);
+  // Every write that owns settings/status bumps this counter, so a poll can
+  // tell whether a write started after its own request went out.
+  const writeGenerationRef = useRef(0);
 
   const adopt = (next: PluginState) => {
     stateRef.current = next;
@@ -107,20 +113,29 @@ export function TouchContent({ locale }: { locale: Language }) {
     let disposed = false;
     let inFlight = false;
 
+    aliveRef.current = true;
+
     const poll = async () => {
       if (inFlight) {
         return;
       }
       inFlight = true;
+      const generationAtStart = writeGenerationRef.current;
+      const busyAtStart = busyRef.current;
       try {
         const next = await fetchState();
         if (disposed) {
           return;
         }
-        // A write owns the authoritative snapshot until it settles.  Skipping
-        // adoption here also keeps a stale poll from overwriting an optimistic
-        // slider value or a just-selected preset.
-        if (!busyRef.current) {
+        // A snapshot may only be adopted when it was requested and delivered
+        // inside the same write generation: if a write started while the poll
+        // was outstanding, the older snapshot would roll back a value the
+        // write has already confirmed.
+        if (
+          !busyAtStart &&
+          !busyRef.current &&
+          writeGenerationRef.current === generationAtStart
+        ) {
           adopt(next);
         }
         setStatusError(null);
@@ -140,11 +155,16 @@ export function TouchContent({ locale }: { locale: Language }) {
 
     return () => {
       disposed = true;
+      aliveRef.current = false;
+      pendingOptionsRef.current = null;
       window.clearInterval(timer);
     };
   }, []);
 
   const runOptions = async (patch: OptionsPatch) => {
+    if (!aliveRef.current) {
+      return;
+    }
     if (busyRef.current) {
       pendingOptionsRef.current = {
         ...(pendingOptionsRef.current ?? {}),
@@ -153,6 +173,7 @@ export function TouchContent({ locale }: { locale: Language }) {
       return;
     }
 
+    writeGenerationRef.current += 1;
     busyRef.current = true;
     setBusy(true);
     setActionError(null);
@@ -161,6 +182,9 @@ export function TouchContent({ locale }: { locale: Language }) {
     try {
       while (currentPatch) {
         const next = await updateOptions(currentPatch);
+        if (!aliveRef.current) {
+          return;
+        }
         const queued = pendingOptionsRef.current;
         pendingOptionsRef.current = null;
         if (queued) {
@@ -173,20 +197,24 @@ export function TouchContent({ locale }: { locale: Language }) {
         currentPatch = null;
       }
     } catch (error) {
-      pendingOptionsRef.current = null;
-      const confirmed = confirmedRef.current;
-      if (confirmed) {
-        stateRef.current = confirmed;
-        setState(confirmed);
-      }
-      setActionError(text("error.save", { error: describeError(error) }));
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-      const queued = pendingOptionsRef.current;
-      if (queued) {
+      if (aliveRef.current) {
         pendingOptionsRef.current = null;
-        void runOptions(queued);
+        const confirmed = confirmedRef.current;
+        if (confirmed) {
+          stateRef.current = confirmed;
+          setState(confirmed);
+        }
+        setActionError(text("error.save", { error: describeError(error) }));
+      }
+    } finally {
+      if (aliveRef.current) {
+        busyRef.current = false;
+        setBusy(false);
+        const queued = pendingOptionsRef.current;
+        if (queued) {
+          pendingOptionsRef.current = null;
+          void runOptions(queued);
+        }
       }
     }
   };
@@ -209,50 +237,68 @@ export function TouchContent({ locale }: { locale: Language }) {
   };
 
   const choosePreset = async (presetId: string) => {
-    if (busyRef.current) {
+    if (!aliveRef.current || busyRef.current) {
       return;
     }
     if (stateRef.current?.settings.active_preset_id === presetId) {
       return;
     }
 
+    writeGenerationRef.current += 1;
     busyRef.current = true;
     setBusy(true);
     setActionError(null);
     try {
-      adopt(await selectPreset(presetId));
+      const next = await selectPreset(presetId);
+      if (!aliveRef.current) {
+        return;
+      }
+      adopt(next);
     } catch (error) {
-      setActionError(text("error.preset", { error: describeError(error) }));
+      if (aliveRef.current) {
+        setActionError(text("error.preset", { error: describeError(error) }));
+      }
     } finally {
-      busyRef.current = false;
-      setBusy(false);
-      const queued = pendingOptionsRef.current;
-      if (queued) {
-        pendingOptionsRef.current = null;
-        void runOptions(queued);
+      if (aliveRef.current) {
+        busyRef.current = false;
+        setBusy(false);
+        const queued = pendingOptionsRef.current;
+        if (queued) {
+          pendingOptionsRef.current = null;
+          void runOptions(queued);
+        }
       }
     }
   };
 
   const toggleControlsVisible = async (visible: boolean) => {
-    if (!stateRef.current || busyRef.current) {
+    if (!aliveRef.current || !stateRef.current || busyRef.current) {
       return;
     }
 
+    writeGenerationRef.current += 1;
     busyRef.current = true;
     setBusy(true);
     setActionError(null);
     try {
-      adopt(await setControlsVisible(visible));
+      const next = await setControlsVisible(visible);
+      if (!aliveRef.current) {
+        return;
+      }
+      adopt(next);
     } catch (error) {
-      setActionError(text("error.visibility", { error: describeError(error) }));
+      if (aliveRef.current) {
+        setActionError(text("error.visibility", { error: describeError(error) }));
+      }
     } finally {
-      busyRef.current = false;
-      setBusy(false);
-      const queued = pendingOptionsRef.current;
-      if (queued) {
-        pendingOptionsRef.current = null;
-        void runOptions(queued);
+      if (aliveRef.current) {
+        busyRef.current = false;
+        setBusy(false);
+        const queued = pendingOptionsRef.current;
+        if (queued) {
+          pendingOptionsRef.current = null;
+          void runOptions(queued);
+        }
       }
     }
   };

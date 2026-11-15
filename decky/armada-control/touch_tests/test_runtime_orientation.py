@@ -73,11 +73,32 @@ def test_direction_change_releases_contacts_and_updates_aspect():
     harness.activate()
     assert harness.daemon.rotation == 270
     landscape = harness.daemon.aspect_ratio
+
+    # Put a real button and a real stick deflection into the sink first, so
+    # the rotation has something to release instead of an empty engine.
+    harness.press_button_and_stick()
+    held = harness.sink.batches[-1]
+    assert ("button", "a", True) in held
+    assert any(
+        event[0] == "axis" and event[1] == "lx" and event[2] != 0
+        for event in held
+    )
+
+    # A direction change is reported as a new session environment; the
+    # daemon must release the held controls and re-grab with the new aspect.
     current["orientation"] = "normal"
     harness.now += 2
     harness.daemon.tick(harness.now)
     assert harness.daemon.rotation == 0
     assert harness.daemon.aspect_ratio == pytest.approx(1 / landscape)
+
+    released = harness.sink.batches[-1]
+    assert ("button", "a", False) in released
+    assert ("axis", "lx", 0.0) in released
+    assert ("axis", "ly", 0.0) in released
+    snapshot = harness.daemon.engine.snapshot()
+    assert snapshot["controls"]["btn_a"]["pressed"] is False
+    assert snapshot["controls"]["stick_l"]["pressed"] is False
 
 
 # ----------------------------------------------------------------------

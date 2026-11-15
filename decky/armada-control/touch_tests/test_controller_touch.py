@@ -209,6 +209,44 @@ class FakeTouch:
         return record
 
 
+class GatedTouch:
+    """Records applied swipe policies and parks the first gated call.
+
+    The first call in the mode's series only finishes once the test releases its
+    event, which makes the interleaving of two overlapping calls explicit
+    instead of timing based. Later calls apply immediately, so a lock-less
+    implementation lets the newer policy finish first and keeps the stale one
+    last instead of parking it too.
+    """
+
+    def __init__(self, mode):
+        self._mode = mode
+        self._gate_used = False
+        self.startup_policies = []
+        self.applied = []
+        self.startup_started = asyncio.Event()
+        self.release_startup = asyncio.Event()
+        self.apply_started = asyncio.Event()
+        self.release_apply = asyncio.Event()
+
+    async def startup(self, enabled, in_game):
+        if self._mode == "startup":
+            self.startup_started.set()
+            await self.release_startup.wait()
+        policy = bool(enabled) and bool(in_game)
+        self.startup_policies.append(policy)
+        return {"settings": {"edge_swipes": policy}}
+
+    async def sync_swipe_policy(self, enabled, in_game):
+        if self._mode == "sync" and not self._gate_used:
+            self._gate_used = True
+            self.apply_started.set()
+            await self.release_apply.wait()
+        policy = bool(enabled) and bool(in_game)
+        self.applied.append(policy)
+        return {"settings": {"edge_swipes": policy}}
+
+
 class TouchRpcTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -363,6 +401,65 @@ class TouchRpcTests(unittest.TestCase):
         first = self.plugin._touch
         self.call(self.plugin.get_touch_state)
         self.assertIs(self.plugin._touch, first)
+
+    def test_concurrent_sync_cannot_apply_a_stale_policy(self):
+        async def scenario():
+            touch = GatedTouch("sync")
+            self.plugin._touch = touch
+            self.system.values["in_game"] = False
+
+            stale = asyncio.create_task(
+                self.plugin._sync_touch_swipe_policy()
+            )
+            # The first sync read the switches and is inside its apply.
+            await asyncio.wait_for(touch.apply_started.wait(), 1.0)
+
+            # The canonical switches moved on before the first sync finished.
+            self.system.values["in_game"] = True
+            fresh = asyncio.create_task(
+                self.plugin._sync_touch_swipe_policy()
+            )
+            _, pending = await asyncio.wait({fresh}, timeout=0.1)
+            parked = fresh in pending
+            touch.release_apply.set()
+            await asyncio.wait_for(asyncio.gather(stale, fresh), 1.0)
+            return touch.applied, parked
+
+        applied, parked = asyncio.run(scenario())
+
+        # The newer read waits for the critical section and is applied last;
+        # the older policy can never be the final value.
+        self.assertTrue(parked)
+        self.assertEqual(applied, [False, True])
+        self.assertEqual(self.system.get_calls, ["overall", "in_game"] * 2)
+
+    def test_startup_and_policy_sync_share_the_policy_lock(self):
+        async def scenario():
+            touch = GatedTouch("startup")
+            self.plugin._touch = touch
+            self.system.values["in_game"] = False
+
+            booting = asyncio.create_task(self.plugin._main())
+            await asyncio.wait_for(touch.startup_started.wait(), 1.0)
+
+            # A newer preference arrives while startup still holds the lock.
+            self.system.values["in_game"] = True
+            syncing = asyncio.create_task(
+                self.plugin._sync_touch_swipe_policy()
+            )
+            _, pending = await asyncio.wait({syncing}, timeout=0.1)
+            parked = syncing in pending
+            touch.release_startup.set()
+            await asyncio.wait_for(asyncio.gather(booting, syncing), 1.0)
+            return touch.startup_policies, touch.applied, parked
+
+        startup_policies, applied, parked = asyncio.run(scenario())
+
+        # Startup kept the saved (older) policy, the queued sync applied the
+        # newer one afterwards -- the older initialization never wins.
+        self.assertTrue(parked)
+        self.assertEqual(startup_policies, [False])
+        self.assertEqual(applied, [True])
 
 
 if __name__ == "__main__":

@@ -370,7 +370,14 @@ class TouchEngine:
         return []
 
     def _hit(self, x, y):
-        for control in self.controls:
+        # draw_controls paints every pad first and every other control after
+        # it, each group in layout order.  Hit testing walks that stacking
+        # order backwards, so a button drawn above a pad wins no matter where
+        # either sits in the layout list.
+        ordered = [c for c in self.controls if c["kind"] == "pad"]
+        ordered.extend(c for c in self.controls if c["kind"] != "pad")
+
+        for control in reversed(ordered):
             if (
                 control["x"] <= x <= control["x"] + control["w"]
                 and control["y"] <= y <= control["y"] + control["h"]

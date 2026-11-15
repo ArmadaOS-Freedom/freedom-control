@@ -408,6 +408,11 @@ class FrameAccumulator:
     single cancel and discards all state, cached positions included; every
     event until the following SYN_REPORT is ignored so a partially dropped
     frame cannot create ghost contacts.
+
+    A frame that replaces this one (a new capture, or a device that was just
+    opened) can be started from the cached slot state with
+    ``clone_positions``/``seed_positions``: it then knows where each slot
+    already is, but owns no contact and still needs a fresh TRACKING_ID.
     """
 
     def __init__(self):
@@ -416,6 +421,59 @@ class FrameAccumulator:
         self._slot = 0
         self._ends = []
         self._dropped = False
+
+    def clone_positions(self):
+        """Return a fresh frame holding only this one's cached slot state.
+
+        The clone keeps every slot's last reported coordinates and the current
+        slot number, so a press that reports a single axis, or none, still
+        begins where the finger already is.  Active contacts and pending ends
+        are deliberately not copied: the clone can only start a gesture from a
+        new TRACKING_ID and can never take over a finger the game owns.
+
+        Cached coordinates read inside a SYN_DROPPED window are not
+        trustworthy, so such a clone starts empty *and* stays inside the
+        dropped window: it ignores every event up to the next SYN_REPORT, so
+        the tail of the dropped frame cannot begin a contact.  Only the frame
+        after that SYN_REPORT starts a gesture.
+        """
+
+        clone = FrameAccumulator()
+        if self._dropped:
+            clone._dropped = True
+            return clone
+        clone._positions = {
+            slot: dict(position) for slot, position in self._positions.items()
+        }
+        clone._slot = self._slot
+        return clone
+
+    def seed_positions(self, positions, slot=0):
+        """Load a read-only slot snapshot into a fresh frame.
+
+        *positions* maps slot numbers to mappings with ``x``/``y`` entries and
+        *slot* is the device's current slot.  Only non-negative integer slots
+        and coordinates survive.  Nothing here creates a contact, and a missing
+        axis stays unknown so a begin still waits for the whole point instead
+        of inventing one.
+        """
+
+        seeded = {}
+        if isinstance(positions, dict):
+            for key, value in positions.items():
+                number = _as_int(key)
+                if number is None or number < 0 or not isinstance(value, dict):
+                    continue
+                point = {
+                    "x": _as_int(value.get("x")),
+                    "y": _as_int(value.get("y")),
+                }
+                if point["x"] is None and point["y"] is None:
+                    continue
+                seeded[number] = point
+        self._positions = seeded
+        current = _as_int(slot)
+        self._slot = current if current is not None and current >= 0 else 0
 
     def consume(self, event_type, code, value):
         """Feed one evdev event and return the events now ready to emit."""

@@ -13,10 +13,12 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
+from py_modules.freedom_touch import session  # noqa: E402
 from py_modules.freedom_touch.daemon import Daemon  # noqa: E402
 from py_modules.freedom_touch.engine import TouchEngine  # noqa: E402
 
@@ -322,6 +324,25 @@ class Harness:
         self.now += 0.02
         self.daemon.tick(self.now)
 
+    def end_touch(self):
+        self.push_frame(
+            [
+                FakeEvent(EV_ABS, MT_SLOT, 0),
+                FakeEvent(EV_ABS, MT_TRACKING_ID, -1),
+                FakeEvent(EV_SYN, SYN_REPORT, 0),
+            ]
+        )
+        self.now += 0.02
+        self.daemon.tick(self.now)
+
+    def control_point(self, control_id):
+        controls = {item["id"]: item for item in self.daemon.effective_controls}
+        control = controls[control_id]
+        return self.raw_point(
+            control["x"] + control["w"] / 2.0,
+            control["y"] + control["h"] / 2.0,
+        )
+
     def press_button_and_stick(self):
         controls = {
             item["id"]: item for item in self.daemon.effective_controls
@@ -583,6 +604,95 @@ class DaemonLifecycleTests(unittest.TestCase):
         raw = TouchEngine(OFFCENTER_LAYOUT)
         raw.set_active(True)
         self.assertEqual(raw.begin(1, 0.32, 0.32, 0.0), [])
+
+    def _leave_for_menu_with_a_native_tap(self, harness):
+        """Let the menu own the panel, tap A natively, then recapture."""
+
+        daemon = harness.daemon
+        harness.focus.apps = (769, 12345)
+        harness.now += 0.1
+        daemon.tick(harness.now)
+        self.assertFalse(daemon.capturing)
+
+        point = harness.control_point("btn_a")
+        frames = len(harness.sink.batches)
+        harness.begin_touch_at(*point)
+        harness.end_touch()
+        self.assertEqual(len(harness.sink.batches), frames)
+
+        harness.focus.apps = (12345, 12345)
+        harness.now += 0.1
+        daemon.tick(harness.now)
+        self.assertTrue(daemon.capturing)
+        return point
+
+    def test_recapture_begins_a_tid_without_coordinates_at_the_cached_point(self):
+        harness = Harness()
+        harness.activate()
+        self._leave_for_menu_with_a_native_tap(harness)
+
+        # The first press after recapture reports only its tracking id.
+        harness.push_frame(
+            [
+                FakeEvent(EV_ABS, MT_SLOT, 0),
+                FakeEvent(EV_ABS, MT_TRACKING_ID, 2),
+                FakeEvent(EV_SYN, SYN_REPORT, 0),
+            ]
+        )
+        harness.now += 0.02
+        harness.daemon.tick(harness.now)
+
+        self.assertIn(("button", "a", True), harness.sink.batches[-1])
+
+    def test_recapture_begins_a_tid_with_a_single_axis_at_the_cached_point(self):
+        harness = Harness()
+        harness.activate()
+        point = self._leave_for_menu_with_a_native_tap(harness)
+
+        # Only X is reported; Y must come from the inherited slot cache.
+        harness.push_frame(
+            [
+                FakeEvent(EV_ABS, MT_SLOT, 0),
+                FakeEvent(EV_ABS, MT_TRACKING_ID, 2),
+                FakeEvent(EV_ABS, MT_POSITION_X, point[0] + 5),
+                FakeEvent(EV_SYN, SYN_REPORT, 0),
+            ]
+        )
+        harness.now += 0.02
+        harness.daemon.tick(harness.now)
+
+        self.assertIn(("button", "a", True), harness.sink.batches[-1])
+
+    def test_open_snapshot_seeds_positions_without_creating_a_gesture(self):
+        harness = Harness()
+        harness.daemon.handle_message(
+            {"type": "settings", "settings": {"enabled": True}}
+        )
+        point = harness.control_point("btn_a")
+        snapshot = ({0: {"x": point[0], "y": point[1]}}, 0)
+
+        with mock.patch.object(
+            session, "touch_slot_snapshot", return_value=snapshot
+        ):
+            harness.activate()
+
+        # The snapshot seeds coordinates only: no contact exists yet.
+        self.assertTrue(harness.daemon.capturing)
+        self.assertEqual(harness.sink.batches, [])
+
+        # A new tracking id reporting a single axis still presses the button.
+        harness.push_frame(
+            [
+                FakeEvent(EV_ABS, MT_SLOT, 0),
+                FakeEvent(EV_ABS, MT_TRACKING_ID, 100),
+                FakeEvent(EV_ABS, MT_POSITION_X, point[0] + 5),
+                FakeEvent(EV_SYN, SYN_REPORT, 0),
+            ]
+        )
+        harness.now += 0.02
+        harness.daemon.tick(harness.now)
+
+        self.assertIn(("button", "a", True), harness.sink.batches[-1])
 
 
 if __name__ == "__main__":

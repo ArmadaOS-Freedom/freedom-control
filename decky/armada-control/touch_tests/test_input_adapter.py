@@ -37,11 +37,18 @@ class FakeBridge:
         self.touches = []
         self.events = []
         self.chords = []
+        # Queued per-call send_touch results; True when the queue is empty.
+        # ``touch_error`` raises instead of replying while it is set.
+        self.touch_results = []
+        self.touch_error = None
 
     def send_touch(self, cap, index, touching, pressure, x, y):
         self.touches.append(
             (cap, index, touching, pressure, x, y)
         )
+        if self.touch_error is not None:
+            raise self.touch_error
+        return self.touch_results.pop(0) if self.touch_results else True
 
     def send_event(self, cap, pressed):
         self.events.append((cap, pressed))
@@ -285,6 +292,80 @@ class InputSinkTests(unittest.TestCase):
         self.assertEqual(len(self.device.writes), writes_after)
         self.assertEqual(self.device.syns, 2)
         self.assertEqual(len(self.bridge.touches), touches_after)
+
+    def test_failed_pad_release_keeps_contact_for_retry(self):
+        for mode in ("false", "raised"):
+            with self.subTest(mode=mode):
+                device = FakeDevice()
+                bridge = FakeBridge()
+                sink = InputSink(device, bridge)
+                sink.emit([("pad", "left", {
+                    "touching": True,
+                    "pressure": 1.0,
+                    "x": 0.25,
+                    "y": 0.75,
+                })])
+
+                if mode == "false":
+                    bridge.touch_results = [False]
+                    expected = RuntimeError
+                else:
+                    bridge.touch_error = OSError("bus down")
+                    expected = OSError
+
+                # The failure must surface to the runtime, and the contact
+                # must stay recorded for the next neutralisation.
+                with self.assertRaises(expected):
+                    sink.neutralize()
+
+                bridge.touch_error = None
+                sink.neutralize()
+                self.assertEqual(
+                    bridge.touches[-1],
+                    ("Touchpad:LeftPad:Motion", 0, False, 0.0, 0.25, 0.75),
+                )
+                self.assertEqual(device.writes, [])
+
+                count = len(bridge.touches)
+                sink.neutralize()
+                self.assertEqual(len(bridge.touches), count)
+
+    def test_failed_pad_release_still_neutralizes_other_controls(self):
+        self.sink.emit([
+            ("button", "a", True),
+            ("pad", "left", {
+                "touching": True, "pressure": 1.0, "x": 0.1, "y": 0.2,
+            }),
+            ("pad", "right", {
+                "touching": True, "pressure": 1.0, "x": 0.3, "y": 0.4,
+            }),
+        ])
+        before = len(self.device.writes)
+
+        # The left pad rejects its release; the right pad and every held
+        # button must still be released in the same call.
+        self.bridge.touch_results = [False]
+        with self.assertRaises(RuntimeError):
+            self.sink.neutralize()
+
+        self.assertEqual(self.device.writes[before:], [(1, 304, 0)])
+        self.assertEqual(self.device.syns, 2)
+        self.assertIn(
+            ("Touchpad:RightPad:Motion", 0, False, 0.0, 0.3, 0.4),
+            self.bridge.touches,
+        )
+
+        # Only the left contact is left over and one retry clears it.
+        self.sink.neutralize()
+        self.assertEqual(
+            self.bridge.touches[-1],
+            ("Touchpad:LeftPad:Motion", 0, False, 0.0, 0.1, 0.2),
+        )
+        self.assertEqual(self.device.writes[before:], [(1, 304, 0)])
+
+        touches = len(self.bridge.touches)
+        self.sink.neutralize()
+        self.assertEqual(len(self.bridge.touches), touches)
 
     def test_close_neutralizes_then_closes_device(self):
         self.sink.emit([("button", "a", True)])

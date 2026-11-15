@@ -8,8 +8,15 @@ import ctypes
 import os
 import shlex
 import subprocess
+from array import array
 from contextlib import contextmanager
 from pathlib import Path
+
+from py_modules.freedom_touch.runtime_policy import (
+    MT_POSITION_X,
+    MT_POSITION_Y,
+    MT_SLOT,
+)
 
 try:
     import pwd
@@ -26,6 +33,20 @@ SERVER_ID_ATOM = b"GAMESCOPE_XWAYLAND_SERVER_ID"
 FOCUS_ATOM = b"GAMESCOPE_FOCUSED_APP"
 FOCUS_GFX_ATOM = b"GAMESCOPE_FOCUSED_APP_GFX"
 OVERLAY_ATOM = b"ARMADA_VIRTUAL_TRACKPADS_OVERLAY"
+
+# include/uapi/linux/input.h: EVIOCGMTSLOTS(len) is
+# _IOC(_IOC_READ, 'E', 0x0a, len) and its buffer is one 32-bit ABS code
+# followed by num_slots signed 32-bit values.  The asm-generic packing below
+# is what arm64 and x86 both use.
+_IOC_READ = 2
+_IOC_NRSHIFT = 0
+_IOC_TYPESHIFT = 8
+_IOC_SIZESHIFT = 16
+_IOC_DIRSHIFT = 30
+EVIOCGMTSLOTS_NR = 0x0A
+# A snapshot table is (num_slots + 1) ints; anything near 16 KiB is already
+# far past a real panel and must never be allocated speculatively.
+MAX_SLOT_SNAPSHOT_BYTES = 1 << 14
 
 _SESSION_KEYS = frozenset(
     {"DISPLAY", "XAUTHORITY", "GAMESCOPE_WAYLAND_DISPLAY"}
@@ -180,6 +201,76 @@ def open_touchscreen(values):
             "multiple event devices match touchscreen %r; refusing to guess" % name
         )
     return matches[0]
+
+
+def _eviocgmtslots(length):
+    """Return EVIOCGMTSLOTS for a table of *length* bytes."""
+
+    return (
+        (_IOC_READ << _IOC_DIRSHIFT)
+        | (length << _IOC_SIZESHIFT)
+        | (ord("E") << _IOC_TYPESHIFT)
+        | (EVIOCGMTSLOTS_NR << _IOC_NRSHIFT)
+    )
+
+
+def _read_slot_axis(fcntl, fd, code, slots):
+    """Read one ABS axis for every slot through EVIOCGMTSLOTS."""
+
+    values = array("i", [0] * (slots + 1))
+    values[0] = code
+    fcntl.ioctl(fd, _eviocgmtslots(len(values) * 4), values, True)
+    return values[1:]
+
+
+def touch_slot_snapshot(touch):
+    """Return ({slot: {"x": int, "y": int}}, current_slot) or None.
+
+    This is a read-only peek at the kernel's multitouch slot state: it never
+    grabs the device, replays events, or changes any setting.  Opening a
+    device mid-sequence therefore knows where each slot already is without
+    pretending a contact exists.
+
+    Everything unsupported or implausible -- no fcntl, no ABS_MT_SLOT, a
+    non-zero minimum, an oversized slot table, an ioctl the driver rejects --
+    simply yields None, so the caller falls back to waiting for complete
+    coordinate events instead of failing to start.
+    """
+
+    try:
+        import fcntl
+    except ImportError:  # Authoring on Windows; deployed systems are Linux.
+        return None
+
+    try:
+        fd = touch.fileno()
+        info = touch.absinfo(MT_SLOT)
+        minimum = info.min
+        maximum = info.max
+        current = info.value
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+
+    for number in (minimum, maximum, current):
+        if isinstance(number, bool) or not isinstance(number, int):
+            return None
+    if minimum != 0 or maximum < 0 or current < 0 or current > maximum:
+        return None
+
+    slots = maximum + 1
+    if (slots + 1) * 4 >= MAX_SLOT_SNAPSHOT_BYTES:
+        return None
+
+    try:
+        xs = _read_slot_axis(fcntl, fd, MT_POSITION_X, slots)
+        ys = _read_slot_axis(fcntl, fd, MT_POSITION_Y, slots)
+    except (OSError, ValueError, OverflowError):
+        return None
+
+    positions = {
+        slot: {"x": xs[slot], "y": ys[slot]} for slot in range(slots)
+    }
+    return positions, current
 
 
 @contextmanager

@@ -700,6 +700,8 @@ const pageButton = (tree, label) =>
   findAll(tree, (node) => node.type === "ButtonItem" && stringsIn(node.props.children).includes(label))[0];
 const pageToggle = (tree, label) =>
   findAll(tree, (node) => node.type === "ToggleField" && node.props.label === label)[0];
+const pageSlider = (tree, label) =>
+  findAll(tree, (node) => node.type === "SliderField" && node.props.label === label)[0];
 const pagePanelTitles = (tree) =>
   findAll(tree, (node) => node.type === "PanelSection").map((node) => node.props.title);
 
@@ -829,4 +831,274 @@ assert.ok(timers.intervals.size < intervalsBeforeUnmount, "unmounting clears the
 
 editorState.endLayoutEditing();
 
-console.log("Touch integration tests passed: prefixed RPCs, global lifecycle, tab mount and the single touch page");
+// ---------------------------------------------------------------------------
+// Touch page: a deferred poll and a tab remount never publish older work
+// ---------------------------------------------------------------------------
+
+const clonePageState = (source) => ({
+  settings: { ...source.settings },
+  status: { ...source.status },
+  presets: source.presets.map((preset) => ({ ...preset })),
+});
+
+let livePageState = clonePageState(pageState);
+let deferNextFetch = false;
+const deferredFetches = [];
+const pendingUpdates = [];
+const issuedPatches = [];
+
+// The backend is modelled as one live snapshot: a write only changes it when
+// the test resolves that write, so a deferred response really is older.
+globalThis.__touchPage.fetchState = () => {
+  pageCalls.fetches += 1;
+  if (deferNextFetch) {
+    deferNextFetch = false;
+    return new Promise((resolve) => deferredFetches.push(resolve));
+  }
+  return Promise.resolve(clonePageState(livePageState));
+};
+globalThis.__touchPage.updateOptions = (patch) => {
+  pageCalls.updates.push(patch);
+  issuedPatches.push(patch);
+  return new Promise((resolve, reject) => pendingUpdates.push({ patch, resolve, reject }));
+};
+globalThis.__touchPage.selectPreset = (id) => {
+  pageCalls.presets.push(id);
+  livePageState = {
+    ...livePageState,
+    settings: { ...livePageState.settings, active_preset_id: id },
+  };
+  return Promise.resolve(clonePageState(livePageState));
+};
+globalThis.__touchPage.setControlsVisible = (visible) => {
+  pageCalls.visible.push(visible);
+  livePageState = {
+    ...livePageState,
+    status: { ...livePageState.status, controls_visible: visible },
+  };
+  return Promise.resolve(clonePageState(livePageState));
+};
+
+const resetPageFixtures = () => {
+  livePageState = clonePageState(pageState);
+  pageCalls.updates.length = 0;
+  pageCalls.presets.length = 0;
+  pageCalls.visible.length = 0;
+  pageCalls.fetches = 0;
+  pageCalls.previews = 0;
+  pageCalls.heartbeats.length = 0;
+  pageCalls.navigations.length = 0;
+  deferredFetches.length = 0;
+  pendingUpdates.length = 0;
+  issuedPatches.length = 0;
+  deferNextFetch = false;
+};
+
+const withSettings = (patch) => {
+  livePageState = {
+    ...livePageState,
+    settings: { ...livePageState.settings, ...patch },
+  };
+  return clonePageState(livePageState);
+};
+
+const completeUpdate = async (entry, response, { fail = false } = {}) => {
+  const index = pendingUpdates.indexOf(entry);
+  assert.ok(index >= 0, "the expected write is in flight");
+  pendingUpdates.splice(index, 1);
+  if (fail) {
+    entry.reject(new Error("backend rejected the write"));
+  } else {
+    entry.resolve(response);
+  }
+  await settle();
+};
+
+const mountPollingPage = async (locale = "en") => {
+  const before = new Set(timers.intervals.keys());
+  const runtime = mountPage(locale);
+  const added = [...timers.intervals.keys()].filter((id) => !before.has(id));
+  assert.equal(added.length, 1, "a mounted page owns exactly one poll timer");
+  await settle();
+  return { runtime, poll: timers.intervals.get(added[0]).callback };
+};
+
+// A poll that goes out before a write and lands after it must not roll the
+// display or the confirmed snapshot back to the older value it carried.
+resetPageFixtures();
+const polledPage = await mountPollingPage();
+const polledOpacity = () =>
+  pageSlider(polledPage.runtime.tree, touch("en", "common.opacity"));
+assert.equal(pageCalls.fetches, 1);
+assert.equal(polledOpacity().props.value, 0.9);
+
+deferNextFetch = true;
+polledPage.poll();
+await settle();
+assert.equal(pageCalls.fetches, 2, "the interval starts a second read");
+assert.equal(deferredFetches.length, 1, "the poll is still outstanding");
+
+polledOpacity().props.onChange(0.4);
+await settle();
+assert.deepEqual(pageCalls.updates, [{ opacity: 0.4 }], "the slider move is written once");
+assert.equal(polledOpacity().props.value, 0.4, "the slider stays optimistic while that write is in flight");
+await completeUpdate(pendingUpdates[0], withSettings({ opacity: 0.4 }));
+assert.equal(polledOpacity().props.value, 0.4, "the completed write stays on screen");
+
+const staleSnapshot = clonePageState(livePageState);
+staleSnapshot.settings.opacity = 0.9;
+staleSnapshot.status = { ...staleSnapshot.status, state: "idle", detail: "stale" };
+deferredFetches.shift()(staleSnapshot);
+await settle();
+assert.equal(polledOpacity().props.value, 0.4, "the stale poll never rolls the display back");
+assert.equal(
+  propStrings(polledPage.runtime.tree).includes(touch("en", "status.state", { value: "stale" })),
+  false,
+  "the stale poll never publishes the older status it carried",
+);
+
+// The confirmed snapshot survived the stale poll: a rejected write falls back
+// to the value the completed write adopted, not to the stale one.
+polledOpacity().props.onChange(0.7);
+await settle();
+assert.equal(polledOpacity().props.value, 0.7);
+await completeUpdate(pendingUpdates[0], undefined, { fail: true });
+assert.equal(
+  polledOpacity().props.value,
+  0.4,
+  "a failed write restores the confirmed value the stale poll left alone",
+);
+assert.ok(
+  propStrings(polledPage.runtime.tree).some((value) => value.includes("backend rejected the write")),
+  "the failed write is reported on the page",
+);
+polledPage.runtime.unmount();
+
+// A tab switch unmounts the page. A write and the slider move queued behind it
+// belong to that instance: once a fresh page has saved a newer value, the old
+// response may neither publish state nor dispatch the queued patch.
+resetPageFixtures();
+const oldPage = await mountPollingPage();
+const oldOpacity = () => pageSlider(oldPage.runtime.tree, touch("en", "common.opacity"));
+oldOpacity().props.onChange(0.3);
+await settle();
+assert.deepEqual(pageCalls.updates, [{ opacity: 0.3 }]);
+oldOpacity().props.onChange(0.35);
+await settle();
+assert.equal(pageCalls.updates.length, 1, "the slider move waits in the local queue");
+assert.equal(oldOpacity().props.value, 0.35, "the queued value is shown optimistically");
+assert.equal(pendingUpdates.length, 1);
+
+const staleWrite = pendingUpdates[0];
+oldPage.runtime.unmount();
+const rendersAtUnmount = oldPage.runtime.renders;
+
+const newPage = await mountPollingPage();
+const newOpacity = () => pageSlider(newPage.runtime.tree, touch("en", "common.opacity"));
+assert.equal(
+  newOpacity().props.value,
+  0.9,
+  "the fresh page reads the backend, not the detached optimistic value",
+);
+
+newOpacity().props.onChange(0.6);
+await settle();
+assert.deepEqual(pageCalls.updates, [{ opacity: 0.3 }, { opacity: 0.6 }]);
+const freshWrite = pendingUpdates.find((entry) => entry !== staleWrite);
+assert.ok(freshWrite, "the newer page wrote its own value");
+await completeUpdate(freshWrite, withSettings({ opacity: 0.6 }));
+assert.equal(newOpacity().props.value, 0.6);
+
+const staleResponse = clonePageState(livePageState);
+staleResponse.settings.opacity = 0.3;
+await completeUpdate(staleWrite, staleResponse);
+assert.deepEqual(
+  pageCalls.updates,
+  [{ opacity: 0.3 }, { opacity: 0.6 }],
+  "the detached page never dispatches its queued patch",
+);
+assert.equal(newOpacity().props.value, 0.6, "the newer page keeps its own setting");
+assert.equal(
+  oldOpacity().props.value,
+  0.35,
+  "the detached page never adopts the late response",
+);
+assert.equal(
+  oldPage.runtime.renders,
+  rendersAtUnmount,
+  "a late resolution never renders the detached page",
+);
+assert.equal(pendingUpdates.length, 0);
+newPage.runtime.unmount();
+
+// The active page still merges slider moves, recovers from a rejected write,
+// selects a preset and hides the overlay.
+resetPageFixtures();
+const workingPage = await mountPollingPage();
+const workingSlider = (key) => pageSlider(workingPage.runtime.tree, touch("en", key));
+assert.equal(workingSlider("common.scale").props.value, 1);
+
+workingSlider("common.opacity").props.onChange(0.5);
+await settle();
+workingSlider("common.opacity").props.onChange(0.55);
+await settle();
+workingSlider("common.opacity").props.onChange(0.6);
+await settle();
+assert.deepEqual(issuedPatches, [{ opacity: 0.5 }], "one write owns the backend while the slider moves");
+assert.equal(pendingUpdates.length, 1, "the queue keeps at most one newest patch");
+assert.equal(workingSlider("common.opacity").props.value, 0.6);
+
+await completeUpdate(pendingUpdates[0], withSettings({ opacity: 0.5 }));
+assert.deepEqual(
+  issuedPatches,
+  [{ opacity: 0.5 }, { opacity: 0.6 }],
+  "the queued patch is sent once the first response lands",
+);
+assert.equal(
+  workingSlider("common.opacity").props.value,
+  0.6,
+  "the older response never overrides the queued slider value",
+);
+await completeUpdate(pendingUpdates[0], withSettings({ opacity: 0.6 }));
+assert.equal(workingSlider("common.opacity").props.value, 0.6);
+
+workingSlider("common.scale").props.onChange(1.2);
+await settle();
+assert.equal(workingSlider("common.scale").props.value, 1.2, "the scale moves optimistically");
+await completeUpdate(pendingUpdates[0], undefined, { fail: true });
+assert.equal(
+  workingSlider("common.scale").props.value,
+  1,
+  "a rejected write restores the confirmed value",
+);
+assert.ok(
+  propStrings(workingPage.runtime.tree).some((value) => value.includes("backend rejected the write")),
+  "the rejected write is reported",
+);
+
+const updatesBeforePreset = pageCalls.updates.length;
+pageButton(workingPage.runtime.tree, "Mine").props.onClick();
+await settle();
+assert.deepEqual(pageCalls.presets, ["custom-1"]);
+assert.ok(
+  propStrings(workingPage.runtime.tree).includes(
+    touch("en", "layout.currentPreset", {
+      name: `Mine${touch("en", "common.customSuffix")}`,
+    }),
+  ),
+  "the chosen preset is reported on the page",
+);
+assert.equal(pageCalls.updates.length, updatesBeforePreset, "a preset choice does not re-send option patches");
+assert.equal(findAll(workingPage.runtime.tree, (node) => node.type === "PanelSection").length, 4);
+
+const showToggle = () => pageToggle(workingPage.runtime.tree, touch("en", "common.show"));
+assert.equal(showToggle().props.checked, true);
+showToggle().props.onChange(false);
+await settle();
+assert.deepEqual(pageCalls.visible, [false]);
+assert.equal(showToggle().props.checked, false, "the visibility toggle reflects the adopted status");
+
+workingPage.runtime.unmount();
+assert.equal(timers.intervals.size, 0, "no page keeps polling once every page is unmounted");
+
+console.log("Touch integration tests passed: prefixed RPCs, global lifecycle, tab mount, the single touch page, and poll/remount ownership");
