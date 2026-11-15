@@ -732,8 +732,10 @@ const pageCalls = {
   navigations: [],
 };
 const pendingUpdates = [];
+const pendingPresets = [];
 const issuedPatches = [];
 let deferNextFetch = false;
+let deferNextPreset = false;
 const deferredFetches = [];
 
 // The backend model: a write only changes the live snapshot when the test
@@ -754,6 +756,10 @@ const pageHandlers = {
   },
   select_touch_preset: (id) => {
     pageCalls.presets.push(id);
+    if (deferNextPreset) {
+      deferNextPreset = false;
+      return new Promise((resolve) => pendingPresets.push({ id, resolve }));
+    }
     livePageState = {
       ...livePageState,
       settings: { ...livePageState.settings, active_preset_id: id },
@@ -811,8 +817,21 @@ const completeUpdate = async (entry, { fail = false, response } = {}) => {
   await settle();
 };
 
+// A deferred preset write applies its id when the backend acknowledges it, so
+// the snapshot it carries is not older than the one a later write returns.
+const completePreset = async (entry) => {
+  assert.ok(entry, "the expected preset write is in flight");
+  livePageState = {
+    ...livePageState,
+    settings: { ...livePageState.settings, active_preset_id: entry.id },
+  };
+  entry.resolve(clonePageState(livePageState));
+  await settle();
+};
+
 const resetPageFixtures = () => {
   assert.equal(pendingUpdates.length, 0, "the previous case left no write in flight");
+  assert.equal(pendingPresets.length, 0, "the previous case left no preset write in flight");
   livePageState = clonePageState(pageState);
   pageCalls.updates.length = 0;
   pageCalls.presets.length = 0;
@@ -824,6 +843,7 @@ const resetPageFixtures = () => {
   issuedPatches.length = 0;
   deferredFetches.length = 0;
   deferNextFetch = false;
+  deferNextPreset = false;
 };
 
 const mountPage = (locale = "en") => {
@@ -1284,6 +1304,47 @@ assert.deepEqual(pageCalls.visible, [false]);
 assert.equal(showToggle().props.checked, false, "the visibility toggle reflects the adopted status");
 
 workingPage.runtime.unmount();
+
+// A preset clicked while an earlier one is still on the wire is the user's
+// newest choice, even though the page still shows the id that choice will
+// replace: it must be queued, not skipped as a repeat of the visible id.
+resetPageFixtures();
+const queuedPage = await mountPollingPage();
+const presetText = (name) => stringsIn(pageButton(queuedPage.runtime.tree, name).props.children);
+const presetSelected = (name) => presetText(name).includes(touch("en", "common.selected"));
+assert.equal(presetSelected("Balanced"), true, "the fixture opens on the built-in preset");
+
+deferNextPreset = true;
+pageButton(queuedPage.runtime.tree, "Mine").props.onClick();
+await settle();
+assert.deepEqual(pageCalls.presets, ["custom-1"], "the custom preset owns the backend");
+assert.equal(pendingPresets.length, 1, "the custom preset is still on the wire");
+assert.ok(
+  propStrings(queuedPage.runtime.tree).includes(touch("en", "status.syncing")),
+  "the page reports the queued write",
+);
+
+pageButton(queuedPage.runtime.tree, "Balanced").props.onClick();
+await settle();
+assert.deepEqual(pageCalls.presets, ["custom-1"], "the newest choice waits behind the queued one");
+assert.equal(pendingPresets.length, 1, "only the queued write is on the wire");
+
+await completePreset(pendingPresets.shift());
+assert.deepEqual(pageCalls.presets, ["custom-1", "builtin-a"], "the newest choice runs once it is its turn");
+assert.equal(livePageState.settings.active_preset_id, "builtin-a", "the backend ends on the newest choice");
+assert.equal(presetSelected("Balanced"), true, "the page marks the newest choice selected");
+assert.equal(presetSelected("Mine"), false, "the replaced preset is no longer selected");
+assert.equal(
+  propStrings(queuedPage.runtime.tree).includes(touch("en", "status.syncing")),
+  false,
+  "the page is idle once both writes finished",
+);
+
+// Idle, clicking the id already in effect stays a no-op.
+pageButton(queuedPage.runtime.tree, "Balanced").props.onClick();
+await settle();
+assert.deepEqual(pageCalls.presets, ["custom-1", "builtin-a"], "an idle repeat sends no redundant write");
+queuedPage.runtime.unmount();
 assert.equal(timers.intervals.size, 0, "no page keeps polling once every page is unmounted");
 
 console.log("Touch integration tests passed: prefixed RPCs, the shared mutation queue, global lifecycle, tab mount, the single touch page, and accepted work across remounts");

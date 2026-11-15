@@ -244,7 +244,14 @@ export function TouchContent({ locale }: { locale: Language }) {
     if (!aliveRef.current) {
       return;
     }
-    if (stateRef.current?.settings.active_preset_id === presetId) {
+    // The id on screen is the newest truth only while nothing is queued: an
+    // earlier choice may still be on the wire, so the id it shows as active is
+    // not the value this click repeats. Submit it instead and let the shared
+    // queue send both in the order the user made them.
+    if (
+      !busyRef.current &&
+      stateRef.current?.settings.active_preset_id === presetId
+    ) {
       return;
     }
     void runMutation(
