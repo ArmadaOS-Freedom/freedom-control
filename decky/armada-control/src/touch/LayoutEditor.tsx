@@ -264,6 +264,9 @@ export default function LayoutEditor() {
   const dragRef = useRef<DragState | null>(null);
   const resizeRef = useRef<ResizeState | null>(null);
   const busyRef = useRef(false);
+  // Set by this instance's own lifecycle effect, so an async save can tell
+  // whether the editor it started in is still the one on screen.
+  const mountedRef = useRef(false);
 
   const [viewport, setViewport] = useState<Viewport>({ width: 1, height: 1 });
   const [state, setState] = useState<State | null>(null);
@@ -279,6 +282,7 @@ export default function LayoutEditor() {
 
   useEffect(() => {
     let disposed = false;
+    mountedRef.current = true;
 
     beginLayoutEditing();
     void sendHeartbeat(null).catch((heartbeatError) => {
@@ -318,6 +322,7 @@ export default function LayoutEditor() {
 
     return () => {
       disposed = true;
+      mountedRef.current = false;
       endLayoutEditing();
     };
   }, []);
@@ -571,14 +576,25 @@ export default function LayoutEditor() {
     setSaving(true);
     try {
       const next = await savePreset(name, draft, 1, overwriteId);
+      // The backend already accepted the save, so it must finish — but this
+      // instance may have been left behind for a newer page or editor. It may
+      // not touch that page's history or its layout-editing flag.
+      if (!mountedRef.current) {
+        return;
+      }
       setState(next);
       endLayoutEditing();
       Navigation.NavigateBack();
     } catch (saveFailure) {
+      if (!mountedRef.current) {
+        return;
+      }
       setError(text("editor.saveError", { error: describeError(saveFailure) }));
     } finally {
       busyRef.current = false;
-      setSaving(false);
+      if (mountedRef.current) {
+        setSaving(false);
+      }
     }
   };
 

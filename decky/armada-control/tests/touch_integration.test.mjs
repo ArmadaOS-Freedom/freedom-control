@@ -6,7 +6,9 @@
 // and the exported Content and TouchContent components are rendered against a
 // minimal React hook shim, so tab order, lazy mounting, the global heartbeat
 // and the page controls are read from the returned element tree, not from
-// source text.
+// source text. The fullscreen LayoutEditor is mounted on the same runtime, so
+// a save that outlives the editor it started in is checked against its real
+// lifecycle effect and the real api queue.
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -620,11 +622,13 @@ const pageHookRuntimeUrl = toModuleUrl(`
       rt.effects.push(slot);
     }
   }
+  export const useLayoutEffect = useEffect;
 `, "page-hooks.js");
 
 const pageUiStub = `export const ButtonItem = "ButtonItem";
 export const Navigation = {
   Navigate: (path) => globalThis.__touchPage.navigations.push(path),
+  NavigateBack: () => { globalThis.__touchPage.backNavigations += 1; },
   CloseSideMenus: () => { globalThis.__touchPage.closedMenus += 1; },
 };
 export const PanelSection = "PanelSection";
@@ -647,6 +651,7 @@ const pageTouchApiUrl = toModuleUrl(
 const pageApiStub = `export {
   fetchState,
   previewHaptics,
+  savePreset,
   selectPreset,
   sendHeartbeat,
   setControlsVisible,
@@ -726,6 +731,7 @@ const pageCalls = {
   fetches: 0,
   updates: [],
   presets: [],
+  saves: [],
   previews: 0,
   visible: [],
   heartbeats: [],
@@ -733,6 +739,7 @@ const pageCalls = {
 };
 const pendingUpdates = [];
 const pendingPresets = [];
+const pendingSaves = [];
 const issuedPatches = [];
 let deferNextFetch = false;
 let deferNextPreset = false;
@@ -766,6 +773,11 @@ const pageHandlers = {
     };
     return Promise.resolve(clonePageState(livePageState));
   },
+  save_touch_preset: (name, savedLayout, scale, overwriteId) => {
+    pageCalls.saves.push({ name, layout: savedLayout, scale, overwriteId });
+    return new Promise((resolve, reject) =>
+      pendingSaves.push({ name, layout: savedLayout, scale, overwriteId, resolve, reject }));
+  },
   set_touch_controls_visible: (visible) => {
     pageCalls.visible.push(visible);
     livePageState = {
@@ -794,6 +806,7 @@ globalThis.__touchPage = {
   },
   heartbeats: pageCalls.heartbeats,
   navigations: pageCalls.navigations,
+  backNavigations: 0,
   closedMenus: 0,
 };
 
@@ -829,24 +842,61 @@ const completePreset = async (entry) => {
   await settle();
 };
 
+// A preset save only changes the backend when it is acknowledged, so a save
+// completed after its editor left still left a real trace.
+const completePresetSave = async (entry, { fail = false } = {}) => {
+  const index = pendingSaves.indexOf(entry);
+  assert.ok(index >= 0, "the expected preset save is on the wire");
+  pendingSaves.splice(index, 1);
+  if (fail) {
+    entry.reject(new Error("backend rejected the preset save"));
+    await settle();
+    return;
+  }
+  const id = entry.overwriteId ?? "custom-saved";
+  livePageState = {
+    ...livePageState,
+    settings: {
+      ...livePageState.settings,
+      active_preset_id: id,
+      layout: entry.layout.map((control) => ({ ...control })),
+    },
+    presets: [
+      ...livePageState.presets.filter((preset) => preset.id !== id),
+      {
+        id,
+        name: entry.name,
+        layout: entry.layout.map((control) => ({ ...control })),
+        scale: entry.scale,
+        builtin: false,
+      },
+    ],
+  };
+  entry.resolve(clonePageState(livePageState));
+  await settle();
+};
+
 const resetPageFixtures = () => {
   assert.equal(pendingUpdates.length, 0, "the previous case left no write in flight");
   assert.equal(pendingPresets.length, 0, "the previous case left no preset write in flight");
+  assert.equal(pendingSaves.length, 0, "the previous case left no preset save in flight");
   livePageState = clonePageState(pageState);
   pageCalls.updates.length = 0;
   pageCalls.presets.length = 0;
+  pageCalls.saves.length = 0;
   pageCalls.visible.length = 0;
   pageCalls.fetches = 0;
   pageCalls.previews = 0;
   pageCalls.heartbeats.length = 0;
   pageCalls.navigations.length = 0;
+  globalThis.__touchPage.backNavigations = 0;
   issuedPatches.length = 0;
   deferredFetches.length = 0;
   deferNextFetch = false;
   deferNextPreset = false;
 };
 
-const mountPage = (locale = "en") => {
+const mountPage = (locale = "en", component = TouchContent) => {
   const runtime = {
     hooks: [],
     cursor: 0,
@@ -855,8 +905,8 @@ const mountPage = (locale = "en") => {
     renders: 0,
     unmounted: false,
     tree: null,
-    component: TouchContent,
-    props: { locale },
+    component,
+    props: component === TouchContent ? { locale } : {},
   };
   runtime.schedule = () => {
     if (runtime.unmounted) return;
@@ -1347,4 +1397,149 @@ assert.deepEqual(pageCalls.presets, ["custom-1", "builtin-a"], "an idle repeat s
 queuedPage.runtime.unmount();
 assert.equal(timers.intervals.size, 0, "no page keeps polling once every page is unmounted");
 
-console.log("Touch integration tests passed: prefixed RPCs, the shared mutation queue, global lifecycle, tab mount, the single touch page, and accepted work across remounts");
+// ---------------------------------------------------------------------------
+// Layout editor: a save that outlives its editor never steers the new page
+// ---------------------------------------------------------------------------
+
+// The editor is the shipped component, mounted on the same hook runtime as the
+// page: its own effects, refs and re-renders run, the real api queue carries
+// its save, and the real editor-state module holds the global editing flag.
+const editorUiStub = `export const Navigation = {
+  Navigate: (path) => globalThis.__touchPage.navigations.push(path),
+  NavigateBack: () => { globalThis.__touchPage.backNavigations += 1; },
+};
+export const TextField = "TextField";`;
+
+const editorStubUrls = {
+  "@decky/ui": asDataUrl(editorUiStub),
+  react: pageHookRuntimeUrl,
+  "react/jsx-runtime": pageStubUrls["react/jsx-runtime"],
+  "../hooks/useLocale": asDataUrl(
+    `export const useLocale = () => globalThis.__touchControllerLocale;`,
+  ),
+  "./api": asDataUrl(pageApiStub),
+  "./editor-state": editorStateUrl,
+  "./touch_i18n": pageTouchI18nUrl,
+};
+
+const layoutEditorJs = transpile(
+  await readSource("../src/touch/LayoutEditor.tsx"),
+  "LayoutEditor.tsx",
+).replace(/from ["']([^"']+)["']/g, (_match, specifier) => {
+  const url = editorStubUrls[specifier];
+  if (!url) throw new Error(`LayoutEditor.tsx imports an unstubbed module: ${specifier}`);
+  return `from "${url}"`;
+});
+const { default: LayoutEditor } = await import(asDataUrl(layoutEditorJs));
+
+const editorButton = (runtime, label) =>
+  findAll(
+    runtime.tree,
+    (node) => node.type === "button" && stringsIn(node.props.children).includes(label),
+  )[0];
+
+const mountEditor = async () => {
+  globalThis.__touchControllerLocale = "en";
+  const runtime = mountPage("en", LayoutEditor);
+  await settle();
+  assert.equal(runtime.tree.type, "div", "the editor renders its canvas");
+  assert.ok(
+    editorButton(runtime, touch("en", "editor.save")),
+    "the editor offers a save button",
+  );
+  return runtime;
+};
+
+// --- Regression: a save finished after the editor left must not steer ------
+
+resetPageFixtures();
+editorState.endLayoutEditing();
+
+const leavingEditor = await mountEditor();
+assert.equal(editorState.isLayoutEditing(), true, "a mounted editor owns the editing flag");
+editorButton(leavingEditor, touch("en", "editor.save")).props.onClick();
+await settle();
+assert.equal(pageCalls.saves.length, 1, "the save reached the backend queue");
+assert.equal(pendingSaves.length, 1, "the save is still on the wire");
+assert.equal(pendingSaves[0].overwriteId, null, "the built-in preset is saved as a new custom one");
+
+// The user backs out through Steam while the save is still in flight, then
+// opens the editor again; the new instance owns the flag from its own effect.
+const leavingRenders = leavingEditor.renders;
+leavingEditor.unmount();
+assert.equal(editorState.isLayoutEditing(), false, "leaving the editor releases the flag");
+
+const reopenedEditor = await mountEditor();
+assert.equal(editorState.isLayoutEditing(), true, "the new editor owns the flag again");
+
+await completePresetSave(pendingSaves[0]);
+assert.equal(
+  livePageState.settings.active_preset_id,
+  "custom-saved",
+  "the save the old editor started still finished on the backend",
+);
+assert.equal(
+  globalThis.__touchPage.backNavigations,
+  0,
+  "the finished old save does not navigate back",
+);
+assert.equal(
+  editorState.isLayoutEditing(),
+  true,
+  "the finished old save leaves the new editor's flag alone",
+);
+assert.equal(leavingEditor.renders, leavingRenders, "the detached editor never renders again");
+
+// The editor still on screen keeps the shipped behaviour: one back navigation
+// and the flag released, for its own save only.
+editorButton(reopenedEditor, touch("en", "editor.save")).props.onClick();
+await settle();
+assert.equal(pendingSaves.length, 1, "the live editor's save is on the wire");
+await completePresetSave(pendingSaves[0]);
+assert.equal(
+  globalThis.__touchPage.backNavigations,
+  1,
+  "the live editor returns to the page exactly once",
+);
+assert.equal(editorState.isLayoutEditing(), false, "the live editor releases the flag");
+assert.equal(
+  propStrings(reopenedEditor.tree).includes(touch("en", "editor.saving")),
+  false,
+  "the live editor leaves its saving state",
+);
+reopenedEditor.unmount();
+
+// --- Regression: a save that fails after the editor left stays silent ------
+
+resetPageFixtures();
+const failingEditor = await mountEditor();
+assert.equal(editorState.isLayoutEditing(), true);
+editorButton(failingEditor, touch("en", "editor.save")).props.onClick();
+await settle();
+assert.equal(pendingSaves.length, 1, "the doomed save is on the wire");
+const failingRenders = failingEditor.renders;
+failingEditor.unmount();
+assert.equal(editorState.isLayoutEditing(), false, "the failed editor released its flag on the way out");
+
+const afterFailureEditor = await mountEditor();
+assert.equal(editorState.isLayoutEditing(), true);
+await completePresetSave(pendingSaves[0], { fail: true });
+assert.equal(globalThis.__touchPage.backNavigations, 0, "a late failure never navigates back");
+assert.equal(
+  editorState.isLayoutEditing(),
+  true,
+  "a late failure never clears the new editor's flag",
+);
+assert.equal(failingEditor.renders, failingRenders, "a late failure never renders the detached editor");
+assert.equal(
+  propStrings(afterFailureEditor.tree).some((value) =>
+    value.includes("backend rejected the preset save")),
+  false,
+  "a late failure is not reported on the editor that replaced it",
+);
+assert.equal(pendingSaves.length, 0, "the editor left no save in flight");
+afterFailureEditor.unmount();
+assert.equal(editorState.isLayoutEditing(), false, "the last editor out releases the flag");
+assert.equal(timers.intervals.size, 0, "the editor owns no timer of its own");
+
+console.log("Touch integration tests passed: prefixed RPCs, the shared mutation queue, global lifecycle, tab mount, the single touch page, accepted work across remounts, and an editor save that outlives its editor");
