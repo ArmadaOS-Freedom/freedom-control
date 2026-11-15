@@ -45,6 +45,19 @@ export const tabIcons = {
       }
     />
   ),
+  // A finger touching a screen: the pad outline with the contact ring.
+  Touch: (
+    <Icon
+      size={TAB_ICON_SIZE}
+      path={
+        <>
+          <rect x="4" y="2.5" width="16" height="19" rx="2.5" />
+          <circle cx="12" cy="11" r="3.2" />
+          <path d="M12 14.2v3.4" />
+        </>
+      }
+    />
+  ),
   // "fan" icon from Lucide (https://lucide.dev), ISC License.
   Fans: (
     <Icon

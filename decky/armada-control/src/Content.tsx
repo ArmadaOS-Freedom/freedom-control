@@ -16,6 +16,8 @@ import { Settings } from "./tabs/Settings";
 import { TfLibraryContent } from "./tf/TfLibraryContent";
 import type { Locale as TfLocale } from "./tf/i18n";
 import { tfText } from "./tf/tf_i18n";
+import { TouchContent } from "./touch/TouchContent";
+import type { Language as TouchLanguage } from "./touch/i18n";
 import type { Config } from "./types";
 
 export function Content() {
@@ -23,6 +25,7 @@ export function Content() {
   // their own UI language and read the TF tab in English.
   const locale = useLocale();
   const tfLocale: TfLocale = locale === "zh-CN" ? "zh" : "en";
+  const touchLocale: TouchLanguage = locale === "zh-CN" ? "zh" : "en";
   const [tab, setTab] = useState("Compatibility");
   const [config, setConfig] = useState<Config | null>(null);
   const [message, setMessage] = useState("Loading");
@@ -87,10 +90,13 @@ export function Content() {
   useDebouncedSave({ config, field: "power", snapshot: savedPowerSnapshot, save: savePowerConfig, setConfig, onError: load });
   useDebouncedSave({ config, field: "tweaks", snapshot: savedTweaksSnapshot, save: saveTweaks, setConfig, onError: load });
   if (!config) return <PanelSection title="Freedom Control"><Field label={message === "Loading" ? t("common.loading") : message} /></PanelSection>;
+  // The body keeps its automatic height for every page; the Touch page is a
+  // normal-flow column that scrolls inside the Controller's own tab panel.
   const tabContent = (content: ReactNode) => (
     <div className="armada-control-tab-content">{content}</div>
   );
   const tfTabLabel = tfText(tfLocale, "tf.title");
+  const touchTabLabel = t("touch.title");
   return (
     <div className="armada-control-tabs">
       <style>{styles}</style>
@@ -100,6 +106,18 @@ export function Content() {
         tabs={[
           { id: "Compatibility", title: tabIcons.Compatibility, content: tabContent(<Compatibility config={config} setConfig={setConfig} />) },
           { id: "Power", title: tabIcons.Power, content: tabContent(<Power config={config} setConfig={setConfig} />) },
+          // Mounted only while its tab is active. The heartbeat and the layout
+          // route are owned by the plugin lifecycle, not by this page, so
+          // switching away never stops an enabled controller.
+          {
+            id: "Touch",
+            title: (
+              <span role="img" aria-label={touchTabLabel} title={touchTabLabel}>
+                {tabIcons.Touch}
+              </span>
+            ),
+            content: tabContent(tab === "Touch" ? <TouchContent locale={touchLocale} /> : null),
+          },
           ...(config.fanSupported ? [
             { id: "Fans", title: tabIcons.Fans, content: tabContent(<Fans setConfig={setConfig} />) },
           ] : []),

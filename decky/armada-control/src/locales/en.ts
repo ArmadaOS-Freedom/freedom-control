@@ -238,6 +238,7 @@ export const en = {
   "common.enabled": "Enabled",
   "common.brightness": "Brightness",
   "common.color": "Color",
+  "touch.title": "Touch Controller",
 } as const;
 
 export type TranslationKey = keyof typeof en;
