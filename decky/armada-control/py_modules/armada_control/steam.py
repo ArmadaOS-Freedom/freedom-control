@@ -46,8 +46,14 @@ def _shortcut_games():
         for shortcut in shortcuts.values():
             if not isinstance(shortcut, dict):
                 continue
-            appid = shortcut.get("appid")
-            name = shortcut.get("AppName")
+            appid = None
+            name = None
+            for key, value in shortcut.items():
+                folded = key.casefold()
+                if folded == "appid":
+                    appid = value
+                elif folded == "appname":
+                    name = value
             if isinstance(appid, int) and appid and isinstance(name, str) and name:
                 games.append({"appid": str(appid), "name": name, "nonSteam": True})
     return games
