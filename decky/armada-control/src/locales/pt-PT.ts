@@ -240,4 +240,5 @@ export const ptPT = {
   "common.enabled": "Ativado",
   "common.brightness": "Brilho",
   "common.color": "Cor",
+  "touch.title": "Controlo por Toque",
 } as const satisfies Record<TranslationKey, string>;

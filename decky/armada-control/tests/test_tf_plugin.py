@@ -26,7 +26,7 @@ from armada_control.tf_library.service import InstallerError, TfLibraryService  
 
 # The Controller modules ``main`` imports for everything except the TF page.
 STUBBED = ("calibration", "config", "controller", "power", "rgb", "steam", "system",
-           "tweaks", "fan_curves", "fan_sensors", "home_power")
+           "tweaks", "fan_curves", "fan_sensors", "home_power", "touch_controller")
 MAIN_NAME = "armada_control_plugin_main"
 
 

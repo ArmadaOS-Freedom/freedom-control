@@ -38,6 +38,25 @@ jobs:
             gir1.2-glib-2.0 \
             dbus
 
+      # The Freedom Touch suite runs the real daemon policy, the real Cairo
+      # drawing code, and a real GTK overlay against Xvfb.
+      - name: Install Freedom Touch test dependencies
+        run: |
+          apt-get install -y --no-install-recommends \
+            python3-pytest \
+            python3-evdev \
+            python3-gi \
+            python3-gi-cairo \
+            python3-cairo \
+            gir1.2-gtk-4.0 \
+            xvfb \
+            xauth \
+            x11-utils \
+            dbus-x11 \
+            fonts-noto-cjk \
+            libx11-6 \
+            libxfixes3
+
       - name: Install plugin dependencies
         working-directory: decky/armada-control
         run: npm ci
@@ -52,6 +71,32 @@ jobs:
 
       - name: Run plugin Python tests
         run: python3 -m unittest discover -s decky/armada-control/tests -p 'test_*.py' -v
+
+      - name: Run Freedom Touch backend tests
+        working-directory: decky/armada-control
+        shell: bash
+        run: |
+          set -euo pipefail
+          for candidate in 99 98 97 96 95 94 93 92 91 90; do
+            if [ ! -e "/tmp/.X${candidate}-lock" ] && \
+               [ ! -e "/tmp/.X11-unix/X${candidate}" ]; then
+              DISPLAY_NUM="$candidate"
+              break
+            fi
+          done
+          if [ -z "${DISPLAY_NUM:-}" ]; then
+            echo "No free X display in the 90-99 range" >&2
+            exit 1
+          fi
+          Xvfb ":${DISPLAY_NUM}" -screen 0 1280x1024x24 -ac -noreset -nolisten tcp &
+          XVFB_PID=$!
+          trap 'kill "$XVFB_PID" 2>/dev/null || true; wait "$XVFB_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 100); do
+            if [ -e "/tmp/.X11-unix/X${DISPLAY_NUM}" ]; then break; fi
+            sleep 0.1
+          done
+          export DISPLAY=":${DISPLAY_NUM}"
+          python3 -m pytest -q touch_tests
 
       - name: Run SM8850 power tests
         run: python3 tests/sm8850-power-test.py

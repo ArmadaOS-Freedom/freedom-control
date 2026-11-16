@@ -145,7 +145,7 @@ export const saveTweaks = async () => {};`,
   "./hooks/useDebouncedSave": `export const useDebouncedSave = () => {};`,
   "./hooks/useLocale": `export const useLocale = () => globalThis.__tfLocale;`,
   "./i18n": `export const t = (key) => key;`,
-  "./icons": `export const tabIcons = { Compatibility: {}, Power: {}, Fans: {}, RGB: {}, TF: {}, Advanced: {} };`,
+  "./icons": `export const tabIcons = { Compatibility: {}, Power: {}, Touch: {}, Fans: {}, RGB: {}, TF: {}, Advanced: {} };`,
   "./lib/games": `export const currentGame = () => null;`,
   "./styles": `export const styles = "";`,
   "./tabs/Compatibility": `export const Compatibility = "Compatibility";`,
@@ -153,6 +153,9 @@ export const saveTweaks = async () => {};`,
   "./tabs/Power": `export const Power = "Power";`,
   "./tabs/Settings": `export const Settings = "Settings";`,
   "./tf/TfLibraryContent": `export const TfLibraryContent = "TfLibraryContent";`,
+  // The touch tab is covered by its own suite; this harness only needs the
+  // module present so Content keeps rendering.
+  "./touch/TouchContent": `export const TouchContent = "TouchContent";`,
   // The page calls the real localiser so the rendered label is the real string.
   "./tf/tf_i18n": transpile(`import { translate } from "${i18nUrl}";
 export const tfText = (locale, key, variables) => translate(locale, key, variables);
@@ -228,11 +231,11 @@ const renderContent = () => {
 
 // The optional pages follow the device flags, and TF stays before Advanced.
 const full = tabsOf(mountContent("en"));
-assert.deepEqual(tabIds(full), ["Compatibility", "Power", "Fans", "RGB", "TF", "Advanced"]);
+assert.deepEqual(tabIds(full), ["Compatibility", "Power", "Touch", "Fans", "RGB", "TF", "Advanced"]);
 const bare = tabsOf(mountContent("en", { ...baseConfig, fanSupported: false, rgbSupported: false }));
-assert.deepEqual(tabIds(bare), ["Compatibility", "Power", "TF", "Advanced"]);
+assert.deepEqual(tabIds(bare), ["Compatibility", "Power", "Touch", "TF", "Advanced"]);
 const rgbOnly = tabsOf(mountContent("en", { ...baseConfig, fanSupported: false, rgbSupported: true }));
-assert.deepEqual(tabIds(rgbOnly), ["Compatibility", "Power", "RGB", "TF", "Advanced"]);
+assert.deepEqual(tabIds(rgbOnly), ["Compatibility", "Power", "Touch", "RGB", "TF", "Advanced"]);
 
 // A fresh default mount: Compatibility is active and the TF page is absent, so
 // no card probe or status poll can run before the tab is opened.

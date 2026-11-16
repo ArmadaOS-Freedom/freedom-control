@@ -15,6 +15,7 @@ import { factoryDefaultTransition } from "./lib/protonPolicy";
 import { installY700FrameRateChoices } from "./lib/y700FrameRateChoices";
 import { registerSteamProfileLocalization } from "./lib/steamProfileLocalization";
 import { installSystemInfoCpuNameFallback } from "./lib/steamSystemInfo";
+import { registerTouchController } from "./touch/integration";
 
 // Gamescope's edge swipes toggle the Steam menus, so a drag inside an open
 // side menu (a quick access slider moved toward the edge) would close it:
@@ -49,6 +50,9 @@ export default definePlugin(() => {
   const unregisterProfileLocalization = registerSteamProfileLocalization();
   const unregisterLowPowerDownloads = registerLowPowerDownloadEntry();
   const stopWatchingSideMenus = watchSideMenus();
+  // The touch heartbeat and its layout route live for the whole plugin
+  // session, independent of which panel tab is open.
+  const disposeTouchController = registerTouchController();
   const persistHandledGames = () => {
     saveCompatApplied(handledGameAppids()).catch(() => {});
   };
@@ -145,6 +149,7 @@ export default definePlugin(() => {
       unregisterProfileLocalization();
       unregisterLowPowerDownloads();
       stopWatchingSideMenus();
+      disposeTouchController();
     },
     icon: (
       <svg

@@ -240,4 +240,5 @@ export const zhCN = {
   "common.enabled": "启用",
   "common.brightness": "亮度",
   "common.color": "颜色",
+  "touch.title": "触屏手柄",
 } as const satisfies Record<TranslationKey, string>;

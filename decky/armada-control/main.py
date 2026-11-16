@@ -22,12 +22,15 @@ from armada_control.system import (
     set_swipe_gestures_in_game_enabled,
     set_usb_network_enabled,
     suspend_swipe_gestures,
+    swipe_gestures_enabled,
+    swipe_gestures_in_game_enabled,
 )
 from armada_control.tweaks import load_compat_applied, save_compat_applied, save_tweaks
 from armada_control.fan_curves import get_state as get_fans_state, save_all as save_fan_curves, save_charging_pwm
 from armada_control.fan_sensors import get_current_temp
 from armada_control.home_power import HomePower
 from armada_control.tf_library.service import InstallerError, TfLibraryService
+from armada_control.touch_controller import TouchController
 
 logger = logging.getLogger("armada-control")
 
@@ -36,6 +39,11 @@ class Plugin:
     def __init__(self):
         self._home_power = HomePower()
         self._tf = TfLibraryService()
+        self._touch = TouchController()
+        # The canonical swipe-switch reads and the touch update they feed are
+        # one critical section: without it two overlapping RPCs (or startup and
+        # an RPC) could apply the older of two policies last.
+        self._touch_policy_lock = asyncio.Lock()
 
     async def _main(self):
         try:
@@ -43,13 +51,32 @@ class Plugin:
         except Exception:
             logger.exception("Failed to apply the saved Steam UI power preference")
 
+        try:
+            # Startup applies the switches it reads while holding the same lock
+            # as the RPC path, so a newer preference can never be overwritten
+            # by the saved state loaded here.
+            async with self._touch_policy_lock:
+                enabled = await asyncio.to_thread(swipe_gestures_enabled)
+                in_game = await asyncio.to_thread(swipe_gestures_in_game_enabled)
+                await self._touch.startup(enabled, in_game)
+        except Exception:
+            logger.exception("Failed to load the saved touch controller state")
+
     async def _unload(self):
+        try:
+            await self._touch.shutdown()
+        except Exception:
+            logger.exception("Failed to stop the touch controller")
         try:
             await asyncio.to_thread(self._home_power.restore)
         except Exception:
             logger.exception("Failed to restore the Steam UI refresh rate on unload")
 
     async def _uninstall(self):
+        try:
+            await self._touch.shutdown()
+        except Exception:
+            logger.exception("Failed to stop the touch controller")
         try:
             await asyncio.to_thread(self._home_power.restore)
         except Exception:
@@ -98,10 +125,28 @@ class Plugin:
         return await asyncio.to_thread(save_compat_applied, appids, proton_default)
 
     async def set_swipe_gestures_enabled(self, enabled):
-        return await asyncio.to_thread(set_swipe_gestures_enabled, enabled)
+        result = await asyncio.to_thread(set_swipe_gestures_enabled, enabled)
+        await self._sync_touch_swipe_policy()
+        return result
 
     async def set_swipe_gestures_in_game_enabled(self, enabled):
-        return await asyncio.to_thread(set_swipe_gestures_in_game_enabled, enabled)
+        result = await asyncio.to_thread(set_swipe_gestures_in_game_enabled, enabled)
+        await self._sync_touch_swipe_policy()
+        return result
+
+    async def _sync_touch_swipe_policy(self):
+        # The Controller's canonical switches are the only edge-swipe
+        # preference; the touch runtime derives its own value from them.  Both
+        # reads and the apply form one critical section, so an RPC that read
+        # the switches later can never be overwritten by an RPC that read them
+        # earlier.
+        async with self._touch_policy_lock:
+            try:
+                enabled = await asyncio.to_thread(swipe_gestures_enabled)
+                in_game = await asyncio.to_thread(swipe_gestures_in_game_enabled)
+                await self._touch.sync_swipe_policy(enabled, in_game)
+            except Exception:
+                logger.exception("Failed to apply the touch swipe policy")
 
     async def suspend_swipe_gestures(self, suspended):
         return await asyncio.to_thread(suspend_swipe_gestures, suspended)
@@ -193,3 +238,32 @@ class Plugin:
 
     async def get_tf_status(self):
         return await self._call_tf(self._tf.status)
+
+    # Touch page: the Freedom Touch runtime is owned by this plugin, so the
+    # frontend reaches it through these prefixed names only.
+    async def get_touch_state(self):
+        return await self._touch.get_state()
+
+    async def set_touch_settings(self, settings):
+        return await self._touch.set_settings(settings)
+
+    async def update_touch_options(self, patch):
+        return await self._touch.update_options(patch)
+
+    async def select_touch_preset(self, preset_id):
+        return await self._touch.select_preset(preset_id)
+
+    async def save_touch_preset(self, name, layout, scale, overwrite_id=None):
+        return await self._touch.save_preset(name, layout, scale, overwrite_id)
+
+    async def reset_touch_layout(self):
+        return await self._touch.reset_layout()
+
+    async def touch_heartbeat(self, appid=None):
+        return await self._touch.heartbeat(appid)
+
+    async def preview_touch_haptics(self):
+        return await self._touch.preview_haptics()
+
+    async def set_touch_controls_visible(self, visible):
+        return await self._touch.set_controls_visible(visible)

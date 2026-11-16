@@ -17,6 +17,7 @@ The current snapshot provides:
 - **Layered configuration** for shared, SoC-specific, and user profiles. Profile values can be defined once for all devices, refined per SoC, and overridden by the user.
 - **Initial Lenovo Legion Tab Y700 Gen 5 (TB323FU, SM8850) support**, including an initial device/SoC profile with CPU frequency caps and core metadata.
 - **CPU governor labels** in the interface, so the selected governor is shown with a readable name rather than only its kernel identifier.
+- **Touch gamepad page**, a single page that draws an on-screen virtual gamepad on the built-in touchscreen, with presets, layout editing, show/hide, and haptics.
 - **TF card game library tab**, which turns the Linux reserve partition of a prepared TF card into a Steam game library without touching the card's Android storage.
 
 SM8850 support is at the initial integration stage; performance tuning is ongoing.
@@ -61,7 +62,17 @@ Freedom Control is a plugin for an existing ArmadaOS or ArmadaOS Freedom install
 - ArmadaOS or ArmadaOS Freedom, including its host services and power/device configuration, and
 - [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader).
 
-Installing only the plugin does not install the companion components under `system_files`; those are part of the operating system image and must be integrated when the OS is built. This repository does not provide an automatic privileged deployment step.
+The Touch page additionally needs matching components from the system image: Gamescope touch overlay and gesture support, InputPlumber touch D-Bus and virtual-device configuration, and a system Python with `evdev`, GI, Cairo, GTK 4 and X11. The plugin does not include these system programs.
+
+Installing only the plugin does not install the companion components under `system_files` or the system programs above; those are part of the operating system image and must be integrated when the OS is built. This repository does not provide an automatic privileged deployment step.
+
+## Touch gamepad
+
+The Touch page draws an on-screen virtual gamepad on the built-in touchscreen. It is one page, with presets, layout editing, show/hide, and haptics.
+
+- Off by default. Turning the touch switch on starts the plugin's own daemon; turning it off stops that daemon and releases the touch device.
+- Edge swipes use the existing Controller swipe-gesture switches: the overall switch and the in-game switch.
+- Touch settings are kept in a separate `touch-controller.json` settings file, apart from the other Controller settings.
 
 ## TF card game library
 
@@ -108,5 +119,7 @@ Freedom Control is derived from Armada Control by the Armada project. Credit for
 The source snapshot is based on [commit `5c560b965d040c07cc76e4a3dd78afaba3fcc796`](https://github.com/mydanyi/armadaos-freedom/tree/5c560b965d040c07cc76e4a3dd78afaba3fcc796/decky/armada-control), together with the existing Freedom Control modifications noted above.
 
 The TF card game library page is ported from [Armada Installer](https://github.com/mydanyi/armada-installer) (`1ac40b959085e6b55c2aef1467080b07560a2431`); the original author and source are retained. Its system-install page, language selector and author panel were not migrated, and the ported TF code is distributed as part of this project under the GNU General Public License v2.0 with the original author's approval.
+
+The touch controller is ported from [decky-freedom-touch-controller](https://github.com/mydanyi/decky-freedom-touch-controller) (`9357d975711d17d3ee70fc97090b01ed47365672`) by 单翼 (danyi); the original author, source and third-party rights are retained. The ported touch code stays under the GNU General Public License v2.0 with the author's permission. Third-party attributions are in [decky/armada-control/TOUCH_THIRD_PARTY_NOTICES.md](decky/armada-control/TOUCH_THIRD_PARTY_NOTICES.md).
 
 This project is distributed under the GNU General Public License v2.0. See [LICENSE](LICENSE).
