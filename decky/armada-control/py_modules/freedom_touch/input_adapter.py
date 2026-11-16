@@ -7,6 +7,7 @@ any machine.
 """
 
 import math
+import threading
 import xml.etree.ElementTree as _ElementTree
 
 # Mirrors runtime_policy.COMPOSITE_IFACE.  Kept local so importing this module
@@ -407,6 +408,12 @@ class InputPlumberBridge:
     ``bus`` may be injected for tests.  Real use discovers the composite that
     InputPlumber created for our exact source path; there is deliberately no
     fallback to the first target or to composite creation.
+
+    A discovery round may be split off into a detached probe with
+    :meth:`make_probe`, so a slow system bus cannot stall the caller: only the
+    probe runs the queries, and :meth:`adopt_probe` copies its verdict onto
+    this live object from the caller's own thread.  Send paths are never
+    touched by a probe, and only a probe carries a cancellable.
     """
 
     SERVICE = "org.shadowblip.InputPlumber"
@@ -428,10 +435,65 @@ class InputPlumberBridge:
         self._bus = bus
         self._timeout = timeout
         self._own_path = None
+        # Only a probe may cancel its own D-Bus calls; the live object keeps
+        # sending with no cancellable at all.
+        self._probe = False
+        self._cancellable = None
+        self._cancelled = False
+        self._cancel_lock = threading.Lock()
 
     @property
     def own_path(self):
         return self._own_path
+
+    def make_probe(self):
+        """Return a detached bridge for one background discovery round.
+
+        The probe is an ordinary bridge object, so it reuses :meth:`discover`
+        and its exact source matching unchanged.  Nothing it does reaches this
+        live object, whose ``own_path`` is only replaced by
+        :meth:`adopt_probe`.  An already connected bus is shared; otherwise
+        the probe connects on its first call, inside its own thread and with
+        its own cancellable, so the caller never blocks on ``bus_get_sync``
+        and a cancelled round can still end that connect.
+        """
+
+        probe = InputPlumberBridge(bus=self._bus, timeout_ms=self._timeout)
+        probe._probe = True
+        return probe
+
+    def cancel(self):
+        """Cancel this probe's own D-Bus calls, if any are in flight.
+
+        A live bridge ignores this: it never creates a cancellable, so its
+        sends and the shared connection stay untouched.
+        """
+
+        with self._cancel_lock:
+            self._cancelled = True
+            if self._cancellable is not None:
+                self._cancellable.cancel()
+
+    def adopt_probe(self, probe):
+        """Take a finished probe's verdict, or clear identity without one."""
+
+        self._own_path = getattr(probe, "own_path", None)
+        bus = getattr(probe, "_bus", None)
+        if self._bus is None and bus is not None:
+            # Reuse the connection the probe already made rather than
+            # connecting again on the input thread.
+            self._bus = bus
+
+    def _probe_cancellable(self):
+        if not self._probe:
+            return None
+        with self._cancel_lock:
+            if self._cancellable is None:
+                Gio, _ = self._gio()
+                self._cancellable = Gio.Cancellable()
+                if self._cancelled:
+                    self._cancellable.cancel()
+            return self._cancellable
 
     @staticmethod
     def _gio():
@@ -443,14 +505,20 @@ class InputPlumberBridge:
     def _bus_handle(self):
         if self._bus is None:
             Gio, _ = self._gio()
-            self._bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+            # A probe's first connection carries the probe's own cancellable,
+            # so abandoning the round can end the connect as well.  The live
+            # object passes None and never closes the shared connection.
+            self._bus = Gio.bus_get_sync(
+                Gio.BusType.SYSTEM, self._probe_cancellable()
+            )
         return self._bus
 
     def discover(self, source_path):
         """Find and validate our composite.  Return ``(ok, detail)``.
 
         On any failure the cached own path is cleared, so later sends cannot
-        hit a stale or unrelated composite.
+        hit a stale or unrelated composite.  A probe passes its own
+        cancellable here; the live object never does.
         """
 
         self._own_path = None
@@ -459,6 +527,7 @@ class InputPlumberBridge:
 
         Gio, GLib = self._gio()
         try:
+            cancel = self._probe_cancellable()
             reply = self._bus_handle().call_sync(
                 self.SERVICE,
                 self.ROOT_PATH,
@@ -468,7 +537,7 @@ class InputPlumberBridge:
                 GLib.VariantType.new("(a{oa{sa{sv}}})"),
                 Gio.DBusCallFlags.NONE,
                 self._timeout,
-                None,
+                cancel,
             )
             objects = reply.unpack()[0]
         except (GLib.Error, AttributeError, IndexError, TypeError) as exc:
@@ -493,30 +562,30 @@ class InputPlumberBridge:
         targets = composite.get("TargetDevices")
         if not isinstance(targets, (list, tuple)) or not targets:
             return False, "composite has no target devices"
-        if not self._has_target_type(targets):
+        if not self._has_target_type(targets, cancel):
             return False, "composite has no %s target" % (
                 self.TARGET_DEVICE_TYPE,
             )
 
-        xml = self._introspect(path)
+        xml = self._introspect(path, cancel)
         if not _has_method(xml, "SendTouchEvent"):
             return False, "composite lacks SendTouchEvent"
 
         self._own_path = path
         return True, ""
 
-    def _has_target_type(self, targets):
+    def _has_target_type(self, targets, cancellable=None):
         for target in targets:
             if not isinstance(target, str):
                 continue
             value = self._get_property(
-                target, self.TARGET_IFACE, "DeviceType"
+                target, self.TARGET_IFACE, "DeviceType", cancellable
             )
             if value == self.TARGET_DEVICE_TYPE:
                 return True
         return False
 
-    def _get_property(self, path, interface, name):
+    def _get_property(self, path, interface, name, cancellable=None):
         Gio, GLib = self._gio()
         try:
             reply = self._bus_handle().call_sync(
@@ -528,13 +597,13 @@ class InputPlumberBridge:
                 GLib.VariantType.new("(v)"),
                 Gio.DBusCallFlags.NONE,
                 self._timeout,
-                None,
+                cancellable,
             )
             return reply.unpack()[0]
         except (GLib.Error, AttributeError, IndexError, TypeError):
             return None
 
-    def _introspect(self, path):
+    def _introspect(self, path, cancellable=None):
         Gio, GLib = self._gio()
         try:
             reply = self._bus_handle().call_sync(
@@ -546,7 +615,7 @@ class InputPlumberBridge:
                 GLib.VariantType.new("(s)"),
                 Gio.DBusCallFlags.NONE,
                 self._timeout,
-                None,
+                cancellable,
             )
             return reply.unpack()[0]
         except (GLib.Error, AttributeError, IndexError, TypeError):

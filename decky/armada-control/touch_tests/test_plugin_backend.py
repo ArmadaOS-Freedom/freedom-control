@@ -665,14 +665,14 @@ def test_heartbeat_queued_behind_disable_does_not_report_unavailable(plugin):
         plugin._child = child
 
         disable = asyncio.create_task(plugin.update_options({"enabled": False}))
-        # The disable is already inside the controller lock: its stop command
-        # reached the child and the drain gate keeps it from completing, so the
-        # lock is held for the whole window the heartbeat arrives in.
+        # The disable reached the short write lock: its stop command is in the
+        # child's drain gate, so that lock is held for the whole window the
+        # heartbeat arrives in.  The settings lock is not what orders them.
         await asyncio.wait_for(child.stdin.entered.wait(), 1.0)
 
         heartbeat = asyncio.create_task(plugin.heartbeat("12345"))
         # One scheduling turn lets the heartbeat reach the held lock and queue
-        # behind the disable; this is ordering, not a timing wait.
+        # behind the disable's stop command; this is ordering, not a wait.
         await asyncio.sleep(0)
 
         child.stdin.release.set()
@@ -688,12 +688,39 @@ def test_heartbeat_queued_behind_disable_does_not_report_unavailable(plugin):
     ] == [{"type": "stop"}]
     assert disabled["settings"]["enabled"] is False
     assert disabled["status"]["state"] == "disabled"
-    # The heartbeat observed the disabled ownership the disable left behind.
-    assert state["state"] == "disabled"
+    # The queued heartbeat neither reached the child nor reported a failure of
+    # its own.  It no longer serializes against the settings lock, so the
+    # snapshot it returns may still be the one the disable is replacing; the
+    # committed state below is the authority for what disable left behind.
+    assert state["state"] != "unavailable"
     assert "心跳" not in state["detail"]
     assert state["capturing"] is False
-    assert final["status"] == state
+    assert final["status"]["state"] == "disabled"
     assert final["settings"]["enabled"] is False
+
+
+def test_heartbeat_after_shutdown_never_writes(plugin, monkeypatch):
+    children, started = _install_children(plugin, monkeypatch, 2)
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        child = plugin._child
+        child.stdin = _StopAwareStdin(child)
+        await plugin.shutdown()
+        before = child.stdin.data
+        state = await asyncio.wait_for(plugin.heartbeat("12345"), 1.0)
+        return state, child, before
+
+    state, child, before = asyncio.run(scenario())
+
+    # The shut-down latch commits before the heartbeat can take the wire lock,
+    # so nothing more reaches the child and no failure is invented.
+    assert len(started) == 1
+    assert plugin._child is None
+    assert child.stdin.data == before
+    assert state["state"] != "unavailable"
+    assert "心跳" not in state["detail"]
 
 
 def _emit_status(plugin, child, controls_visible, **overrides):
@@ -1579,21 +1606,73 @@ def test_explicit_enable_after_exhaustion_opens_a_fresh_budget(plugin, monkeypat
 def test_a_child_that_ran_stably_opens_a_fresh_budget(plugin, monkeypatch):
     children, started = _install_children(plugin, monkeypatch, 2)
     monkeypatch.setattr(controller_module, "RESTART_BACKOFF_SECONDS", (0.0,))
+    # A short virtual threshold instead of a real thirty-second uptime.
+    monkeypatch.setattr(controller_module, "STABLE_CHILD_UPTIME_SECONDS", 0.05)
 
     async def scenario():
         await _start(plugin)
         await plugin.update_options({"enabled": True})
         plugin._restart_attempts = 2
-        plugin._child_started_at = (
-            asyncio.get_running_loop().time()
-            - controller_module.STABLE_CHILD_UPTIME_SECONDS
-            - 1.0
-        )
+        loop = asyncio.get_running_loop()
+        started_at = plugin._child_started_at
+        await _until(lambda: loop.time() - started_at >= 0.06)
         children[0].crash(7)
-        await _until(lambda: len(started) == 2)
+        await _until(
+            lambda: len(started) == 2 and plugin._restart_task is None
+        )
         return plugin._restart_attempts
 
+    # The child really lived past the window before its exit was observed, so
+    # the spent budget is opened again.
     assert asyncio.run(scenario()) == 1
+
+
+def test_a_lock_wait_is_not_child_uptime_for_the_restart_budget(
+    plugin, monkeypatch
+):
+    children, started = _install_children(plugin, monkeypatch, 3)
+    monkeypatch.setattr(controller_module, "RESTART_BACKOFF_SECONDS", (0.0,))
+    monkeypatch.setattr(controller_module, "STABLE_CHILD_UPTIME_SECONDS", 0.05)
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        plugin._restart_attempts = 2
+
+        # The child is gone within milliseconds, but the settings lock stays
+        # held far longer than the whole (shortened) stability window.
+        lock = plugin._ensure_lock()
+        await lock.acquire()
+        try:
+            children[0].crash(7)
+            await _until(lambda: plugin._restart_task is not None)
+            await asyncio.sleep(0.15)
+            # The restart is still queued behind the held settings lock.
+            assert len(started) == 1
+            assert plugin._child is children[0]
+        finally:
+            lock.release()
+
+        await _until(
+            lambda: plugin._child is children[1]
+            and plugin._restart_task is None
+        )
+        attempts = plugin._restart_attempts
+
+        # The next quick exit has to hit the ceiling the wait did not erase.
+        children[1].crash(7)
+        await _until(lambda: "停止自动重启" in plugin._status["detail"])
+        await asyncio.sleep(0.05)
+        return attempts, plugin._snapshot(), plugin._child
+
+    attempts, state, child = asyncio.run(scenario())
+
+    # The child was up for a moment; the lock wait is not uptime, so the spent
+    # budget is not refreshed and the fourth spawn never happens.
+    assert attempts == 3
+    assert len(started) == 2
+    assert child is children[1]
+    assert state["status"]["state"] == "unavailable"
 
 
 def test_restart_spawn_failure_keeps_the_error_and_a_manual_retry_works(
@@ -1828,6 +1907,87 @@ def test_blocking_persist_keeps_the_event_loop_responsive(plugin, monkeypatch):
     state = asyncio.run(scenario())
 
     assert state["settings"]["opacity"] == 0.6
+
+
+def test_blocking_persist_does_not_starve_the_heartbeat(plugin, monkeypatch):
+    children, started = _install_children(plugin, monkeypatch, 2)
+    real_persist = controller_module.TouchController._persist_settings
+    entered = threading.Event()
+    release = threading.Event()
+
+    def gated(settings):
+        if settings["opacity"] == 0.6 and not release.is_set():
+            entered.set()
+            if not release.wait(5.0):
+                raise AssertionError("the persist gate was never released")
+        real_persist(plugin, settings)
+
+    monkeypatch.setattr(plugin, "_persist_settings", gated)
+
+    async def scenario():
+        await _start(plugin)
+        await plugin.update_options({"enabled": True})
+        child = plugin._child
+        plugin._status = {
+            "state": "ready",
+            "detail": "ok",
+            "capturing": True,
+            "controls_visible": True,
+        }
+        before = child.stdin.data
+
+        save = asyncio.create_task(plugin.update_options({"opacity": 0.6}))
+        await _until(entered.is_set)
+        assert not save.done()
+
+        # The settings lock is held by a worker thread stuck in fsync, but the
+        # heartbeat takes only the wire lock: the daemon still gets its ping,
+        # so it keeps the capture instead of expiring the heartbeat.
+        beat = await asyncio.wait_for(plugin.heartbeat("12345"), 1.0)
+
+        # While the save is still gated the wire may carry the heartbeat and
+        # nothing else: the settings publish belongs to the commit that has not
+        # happened yet.  Reading the segment as whole lines keeps a second
+        # message from hiding behind a single json.loads.
+        gated_lines = child.stdin.data[len(before):].decode("utf-8").splitlines()
+        assert len(gated_lines) == 1
+        assert json.loads(gated_lines[0]) == {
+            "type": "heartbeat",
+            "appid": "12345",
+        }
+
+        # Timers and reads keep running too, and the save is still uncommitted.
+        fired = asyncio.Event()
+        asyncio.get_running_loop().call_later(0.01, fired.set)
+        await asyncio.wait_for(fired.wait(), 1.0)
+        pending = await asyncio.wait_for(plugin.get_state(), 1.0)
+        assert not save.done()
+
+        release.set()
+        committed = await asyncio.wait_for(save, 5.0)
+        return beat, pending, committed, child, before
+
+    beat, pending, committed, child, before = asyncio.run(scenario())
+
+    # The final increment holds exactly the two messages the child received,
+    # in write order: the heartbeat that kept the capture alive, then the
+    # canonical settings of the save that followed the fsync.
+    final_lines = child.stdin.data[len(before):].decode("utf-8").splitlines()
+    assert [json.loads(line) for line in final_lines] == [
+        {"type": "heartbeat", "appid": "12345"},
+        {
+            "type": "settings",
+            "settings": json.loads(json.dumps(committed["settings"])),
+        },
+    ]
+    # A heartbeat that reached the child never downgrades the live capture.
+    assert beat["state"] == "ready"
+    assert beat["capturing"] is True
+    assert "心跳" not in beat["detail"]
+    assert pending["status"] == beat
+    assert pending["settings"]["opacity"] != 0.6
+    assert committed["settings"]["opacity"] == 0.6
+    assert plugin._child is started[0]
 
 
 def test_two_saves_persist_in_order(plugin, tmp_path, monkeypatch):

@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import pwd
@@ -365,6 +366,16 @@ class Daemon:
         self._last_discovery = -1e9
         self._last_focus = -1e9
         self._last_visual = -1e9
+        # InputPlumber discovery can block for seconds on a slow system bus, so
+        # it runs in this one lazily created worker.  Only one round may be in
+        # flight; tick() adopts its result on the input thread, and the live
+        # bridge is never written by the worker.
+        self._executor = None
+        self._probe_future = None
+        self._probe = None
+        self._probe_key = None
+        self._probe_newly_created = False
+        self._probe_generation = 0
         self._last_haptics_refresh = -1e9
         self._last_haptics_preview = -1e9
         self._overlay_retry_at = 0.0
@@ -698,6 +709,9 @@ class Daemon:
         self._override = None
 
     def _close_ui(self):
+        # The controller source is going away: a query still running for it
+        # must never bind its composite to whatever source comes next.
+        self._invalidate_probe()
         ui = self.ui
         self.ui = None
         self.source_path = None
@@ -920,6 +934,164 @@ class Daemon:
                 self._log("cannot create InputPlumber bridge: %s" % (exc,))
                 return
 
+        if self._start_probe(newly_created):
+            return
+        self._discover_bridge_sync(newly_created)
+
+    def _start_probe(self, newly_created):
+        """Submit one background discovery.  True when the bridge has a probe.
+
+        A bridge without ``make_probe``/``adopt_probe`` keeps the synchronous
+        path below, which is what the existing device doubles rely on.  The
+        real bridge always probes, so a slow bus never holds the input thread.
+        """
+
+        bridge = self.bridge
+        make_probe = getattr(bridge, "make_probe", None)
+        adopt_probe = getattr(bridge, "adopt_probe", None)
+        if make_probe is None or adopt_probe is None:
+            return False
+        if self._probe_future is not None:
+            # One query at a time.  A newer source must not queue behind the
+            # round already running; its result is dropped by identity instead.
+            return True
+
+        try:
+            probe = make_probe()
+        except Exception as exc:
+            self._failures["bridge"] = str(exc)
+            self._log("cannot create discovery probe: %s" % (exc,))
+            self._release_capture("composite unavailable")
+            return True
+
+        key = (self._probe_generation, self.source_path, id(bridge))
+        try:
+            future = self._ensure_executor().submit(
+                self._run_probe, probe, self.source_path
+            )
+        except Exception as exc:
+            self._failures["bridge"] = str(exc)
+            self._log("cannot start discovery probe: %s" % (exc,))
+            self._release_capture("composite unavailable")
+            return True
+
+        self._probe = probe
+        self._probe_future = future
+        self._probe_key = key
+        self._probe_newly_created = newly_created
+        return True
+
+    @staticmethod
+    def _run_probe(probe, source_path):
+        """Worker body: only the detached probe belongs to this thread.
+
+        The round's verdict is unpacked here, so the future always carries
+        ``(probe, ok, detail)`` - the same shape :meth:`_poll_probe` reads.
+        """
+
+        ok, detail = probe.discover(source_path)
+        return probe, ok, detail
+
+    def _ensure_executor(self):
+        executor = self._executor
+        if executor is None:
+            executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="freedom-touch-discovery",
+            )
+            self._executor = executor
+        return executor
+
+    def _probe_identity(self):
+        return (self._probe_generation, self.source_path, id(self.bridge))
+
+    def _invalidate_probe(self):
+        """Cancel the running query and make its answer stale.
+
+        The round stays in flight until its worker returns, so no second
+        query is ever started alongside it; the next tick drops the result
+        because its identity no longer matches.
+        """
+
+        self._probe_generation += 1
+        cancel = getattr(self._probe, "cancel", None)
+        if cancel is None:
+            return
+        try:
+            cancel()
+        except Exception as exc:
+            self._log("cannot cancel discovery probe: %s" % (exc,))
+
+    def _poll_probe(self, now):
+        """Adopt a finished background discovery on the input thread."""
+
+        future = self._probe_future
+        if future is None or not future.done():
+            return
+
+        key = self._probe_key
+        probe = self._probe
+        newly_created = self._probe_newly_created
+        self._probe_future = None
+        self._probe_key = None
+        self._probe = None
+        self._probe_newly_created = False
+
+        bridge = self.bridge
+        adopt_probe = getattr(bridge, "adopt_probe", None)
+        if (
+            probe is None
+            or adopt_probe is None
+            or key != self._probe_identity()
+        ):
+            # The source, the bridge or the round itself changed while this
+            # query ran: its answer belongs to hardware that is no longer
+            # ours, so it may not bind or revive anything.
+            self._last_discovery = -1e9
+            return
+
+        raised = False
+        finished = None
+        try:
+            finished, ok, detail = future.result()
+        except Exception as exc:
+            # Cancelled proposals and a genuinely broken bridge land here.
+            ok, detail, raised = False, str(exc), True
+
+        try:
+            if ok:
+                adopt_probe(finished)
+            else:
+                # Only a complete, successful round may bind an identity.  A
+                # failed or raised one must clear it: a probe that never
+                # returned a verdict must not leave a half-known composite on
+                # the live object, and reusing its connection is not worth a
+                # wrong binding.
+                adopt_probe(None)
+        except Exception as exc:
+            ok, detail = False, str(exc)
+
+        # The next round is throttled from the moment this one finished, not
+        # from the moment it was submitted.
+        self._last_discovery = now
+
+        if not ok:
+            self._failures["bridge"] = detail or "composite 不可用"
+            if raised and newly_created:
+                # A broken bridge on a just-created source must not leave a
+                # stray controller around; retry with a fresh one next time.
+                self._close_ui()
+                self.bridge = None
+                self.sink = None
+            self._release_capture("composite unavailable")
+            return
+
+        self._failures.pop("bridge", None)
+        self._ensure_sink()
+
+    def _discover_bridge_sync(self, newly_created):
+        """Discover inside the input thread, for bridges without a probe."""
+
         try:
             ok, detail = self.bridge.discover(self.source_path)
         except Exception as exc:
@@ -937,13 +1109,42 @@ class Daemon:
             return
 
         self._failures.pop("bridge", None)
-        if self.sink is None:
-            try:
-                self.sink = self._sink_factory(self.ui, self.bridge)
-                self._failures.pop("sink", None)
-            except Exception as exc:
-                self._failures["sink"] = str(exc)
-                self._log("cannot create input sink: %s" % (exc,))
+        self._ensure_sink()
+
+    def _ensure_sink(self):
+        if self.sink is not None:
+            return
+        try:
+            self.sink = self._sink_factory(self.ui, self.bridge)
+            self._failures.pop("sink", None)
+        except Exception as exc:
+            self._failures["sink"] = str(exc)
+            self._log("cannot create input sink: %s" % (exc,))
+
+    def _stop_probe_executor(self):
+        """Cancel background discovery and release its own worker.
+
+        The call is deliberately not waited for: the probe's cancellable ends
+        its D-Bus request, and the input thread must never block on a bus that
+        may already be wedged.
+        """
+
+        self._invalidate_probe()
+        executor = self._executor
+        self._executor = None
+        future = self._probe_future
+        self._probe_future = None
+        self._probe_key = None
+        self._probe = None
+        self._probe_newly_created = False
+        if future is not None:
+            future.cancel()
+        if executor is None:
+            return
+        try:
+            executor.shutdown(wait=False)
+        except Exception as exc:
+            self._log("discovery executor shutdown failed: %s" % (exc,))
 
     # ------------------------------------------------------------------
     # overlay process
@@ -1861,8 +2062,13 @@ class Daemon:
     # ------------------------------------------------------------------
 
     def tick(self, now=None):
+        # One clock sample opens the tick.  Every later stage adds only the
+        # non-negative time that really elapsed since the previous sample, so
+        # the explicit frame time keeps its own domain: a clock that reads 1000
+        # can never replace a frame time that reads 10.
+        checkpoint = self._now()
         if now is None:
-            now = self._now()
+            now = checkpoint
 
         if not self.settings["enabled"]:
             self._publish(now)
@@ -1875,6 +2081,9 @@ class Daemon:
                 )
             self.engine = self._make_engine(self.settings)
 
+        # A finished background discovery is adopted here, on the input
+        # thread, and only its verdict is allowed to change the live bridge.
+        self._poll_probe(now)
         if now - self._last_discovery >= DISCOVERY_SECONDS:
             self._discover(now)
 
@@ -1885,6 +2094,11 @@ class Daemon:
         # so a leftover contact is cleared ahead of any new grab; a failure is
         # contained inside the retry and cannot block the rest of the frame.
         self._retry_neutralize()
+        # Discovery, controller writes, focus, haptics and a release retry may
+        # each spend seconds inside a D-Bus reply.  Every policy decision below
+        # must run on the time that really passed, or an expired heartbeat
+        # would keep capturing.
+        now, checkpoint = self._advance(now, checkpoint)
         self._update_capture(now)
         # Eligibility is evaluated before the passive stream is consumed, so
         # a lost menu/focus/heartbeat cancels even with no new touch frame.
@@ -1895,12 +2109,44 @@ class Daemon:
         # dispatched to the main controller engine or the game's touch owner.
         if self.touch is not None:
             self._read_touch(now)
+        # The physical read can block as well.  It is measured from the
+        # checkpoint the polls left behind, so one block is never counted
+        # twice.
+        now, checkpoint = self._advance(now, checkpoint)
         self._settle_collapse()
         self._dispatch_passive(now)
 
         self._queue_visual()
         self._flush_visual(now)
         self._publish(now)
+
+    def _advance(self, now, checkpoint):
+        """Return *(now advanced by the elapsed clock time, new checkpoint)*.
+
+        ``checkpoint`` is a sample this tick already took; the caller passes
+        the returned one to the next stage.  Only the non-negative delta since
+        that sample is added to *now*, so the frame time never adopts the
+        clock's absolute domain and two stages cannot count the same elapsed
+        time twice.
+        """
+
+        try:
+            current = float(self._now())
+        except (TypeError, ValueError):
+            return now, checkpoint
+        if not math.isfinite(current):
+            return now, checkpoint
+        try:
+            spent = current - float(checkpoint)
+        except (TypeError, ValueError):
+            return now, current
+        if spent <= 0.0:
+            return now, current
+        try:
+            advanced = float(now) + spent
+        except (TypeError, ValueError):
+            return now, current
+        return advanced, current
 
     def _read_stdin(self, fd):
         while True:
@@ -1982,6 +2228,9 @@ class Daemon:
             return
         self._shutdown_done = True
         self._stop = True
+        # Stop background discovery first so no late answer can revive the
+        # hardware this shutdown is about to close.
+        self._stop_probe_executor()
 
         try:
             self._release_capture("shutdown")

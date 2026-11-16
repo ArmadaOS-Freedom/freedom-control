@@ -97,6 +97,10 @@ class TouchController:
         }
         self._settings_error = None
         self._lock = None
+        # Every JSON line written to the child shares this short lock, so a
+        # message stays whole without making a heartbeat queue behind the
+        # settings lock and the fsync it may be running.
+        self._write_lock = None
         self._status_event = None
         # Effective edge-swipe policy, derived from the Controller's system
         # switches.  Persisted settings never win over this value.
@@ -118,6 +122,11 @@ class TouchController:
         self._restart_handled_child = None
         self._restart_attempts = 0
         self._child_started_at = None
+        # The earliest moment the current child was seen exited.  The stability
+        # window is measured from the child's start to this instant, never to
+        # the moment a restart task happens to run.
+        self._exit_observed_child = None
+        self._exit_observed_at = None
         self._shutdown = False
 
     # ------------------------------------------------------------------
@@ -204,22 +213,36 @@ class TouchController:
         if appid is not None and not isinstance(appid, str):
             raise ValueError("appid must be a string or None")
 
-        # Settings, ownership and the child are re-read under the same lock
-        # that guards the write and the status update.  A ping that queued
-        # behind an explicit disable (or shutdown, or a child replacement)
-        # therefore sees the state that disable left behind instead of
-        # sending to a child that is already gone and reporting its absence
-        # as a fresh failure.  Only a live, enabled child can be reported
-        # unavailable.
-        async with self._ensure_lock():
-            if not self._settings["enabled"] or not self._child_running():
-                return dict(self._status)
-            try:
-                await self._send_unlocked(
+        # A heartbeat must not queue behind the settings lock: that lock is
+        # held for a whole atomic persist, and the daemon drops the capture
+        # when a heartbeat arrives after its deadline.  Only the short wire
+        # lock is taken here, so the message stays whole while a slow fsync
+        # runs elsewhere.  Settings, ownership and the child are re-read
+        # inside that lock, so a ping queued behind an explicit disable, a
+        # child replacement or a shutdown is never written to a child that is
+        # already gone and reported as a fresh failure.
+        child = None
+        try:
+            async with self._ensure_write_lock():
+                if (
+                    self._stopping
+                    or self._shutdown
+                    or not self._settings["enabled"]
+                    or not self._child_running()
+                ):
+                    return dict(self._status)
+                child = self._child
+                await self._write_locked(
                     {"type": "heartbeat", "appid": appid}
                 )
-            except Exception as exc:
-                decky.logger.error("Freedom Touch heartbeat failed: %s", exc)
+        except Exception as exc:
+            # A lifecycle step that raced this write owns the state now; a
+            # failure of the write to the old child must not paint the new
+            # child, or a disabled/shut-down controller, as unavailable.
+            if self._heartbeat_owns_current_state(child):
+                decky.logger.error(
+                    "Freedom Touch heartbeat failed: %s", exc
+                )
                 self._set_status(
                     "unavailable",
                     "无法向触摸控制器发送心跳：%s" % exc,
@@ -610,9 +633,9 @@ class TouchController:
 
         # A daemon started by a previous plugin instance learned settings over
         # stdin; a new process has none.  Push the persisted canonical settings
-        # exactly once, now that the reader tasks exist.  This is called with
-        # the lock already held by _commit_locked on restart, so use the
-        # unlocked writer directly.
+        # exactly once, now that the reader tasks exist.  This runs with the
+        # controller lock already held, so it must not take it again: the
+        # writer below only needs the short wire lock.
         try:
             await self._send_unlocked(
                 {"type": "settings", "settings": self._settings}
@@ -738,6 +761,19 @@ class TouchController:
         self._wait_task = None
 
     async def _send_unlocked(self, message):
+        """Write one whole JSON line, serialized with every other write.
+
+        Callers already hold the controller lock; this only takes the short
+        wire lock, so the message stays atomic without being ordered behind
+        unrelated settings work.
+        """
+
+        async with self._ensure_write_lock():
+            await self._write_locked(message)
+
+    async def _write_locked(self, message):
+        """Write one whole JSON line; the caller owns the wire lock."""
+
         child = self._child
         if (
             child is None
@@ -769,6 +805,13 @@ class TouchController:
             raise
         except Exception:
             returncode = None
+
+        observed_at = asyncio.get_running_loop().time()
+        if self._child is child:
+            # Taken before the status update and before any restart can wait
+            # for a lock: this is the instant the child's exit was seen, and
+            # the stability window has to end here, not after a lock wait.
+            self._record_exit_observation(child, observed_at)
 
         if self._child is not child or self._stopping or self._shutdown:
             return
@@ -815,12 +858,7 @@ class TouchController:
                 if not self._restart_allowed_locked(child):
                     return
 
-                started_at = self._child_started_at
-                if (
-                    started_at is not None
-                    and asyncio.get_running_loop().time() - started_at
-                    >= STABLE_CHILD_UPTIME_SECONDS
-                ):
+                if self._child_was_stable(child):
                     self._restart_attempts = 0
 
                 if self._restart_attempts >= MAX_RESTART_ATTEMPTS:
@@ -875,7 +913,9 @@ class TouchController:
         after the ownership was released, keeps that exit from disappearing;
         the identity check excludes the child this restart replaced, and
         _schedule_restart ignores a child already covered, so the report and
-        this check can never start two children.
+        this check can never start two children.  The retry measures the
+        replacement's uptime with the exit observation _wait_child took at the
+        real exit, so the drain that delayed this check is not uptime.
         """
 
         if replacement is None or replacement is not self._child:
@@ -883,6 +923,43 @@ class TouchController:
         if replacement.returncode is None:
             return
         self._schedule_restart(replacement)
+
+    def _record_exit_observation(self, child, observed_at):
+        """Remember the earliest moment this child was seen exited.
+
+        A later observation of the same child never moves the record forward,
+        so a duplicate report cannot make a quick exit look stable.  A record
+        for another child is replaced: the previous child's exit is irrelevant
+        to the one that is current now.
+        """
+
+        if self._exit_observed_child is child:
+            if observed_at < self._exit_observed_at:
+                self._exit_observed_at = observed_at
+            return
+        self._exit_observed_child = child
+        self._exit_observed_at = observed_at
+
+    def _child_was_stable(self, child):
+        """True when this child ran long enough before its exit was observed.
+
+        The window ends at the observed exit, not at the current time: a
+        restart task that waited for the settings lock (a slow fsync, an
+        explicit write) must not turn that wait into child uptime and launder
+        a crash loop into a stable run.  Without an observation for this exact
+        child the answer is "not stable", which spends the budget instead of
+        resetting it.
+        """
+
+        if self._exit_observed_child is not child:
+            return False
+        started_at = self._child_started_at
+        if started_at is None:
+            return False
+        return (
+            self._exit_observed_at - started_at
+            >= STABLE_CHILD_UPTIME_SECONDS
+        )
 
     def _restart_allowed_locked(self, child):
         return (
@@ -1047,6 +1124,23 @@ class TouchController:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    def _ensure_write_lock(self):
+        if self._write_lock is None:
+            self._write_lock = asyncio.Lock()
+        return self._write_lock
+
+    def _heartbeat_owns_current_state(self, child):
+        """True when a failed heartbeat still describes the live ownership."""
+
+        return (
+            child is not None
+            and child is self._child
+            and child.returncode is None
+            and not self._stopping
+            and not self._shutdown
+            and self._settings["enabled"]
+        )
 
     def _select_locked(self, preset_id):
         if not isinstance(preset_id, str) or not preset_id:
