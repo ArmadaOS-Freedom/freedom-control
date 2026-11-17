@@ -330,6 +330,47 @@ class FailingRequestRunner(WorkerRunner):
         return super().__call__(argv, **kwargs)
 
 
+class DelayedVdfRunner(WorkerRunner):
+    """A runner that writes the VDF only after ``delay_reads`` membership misses.
+
+    The native request exits 0 *before* the VDF is written, mimicking the
+    incident where the one-shot read missed the asynchronous write but the
+    library folder appeared moments later under a retry.  The counters let a
+    test prove the worker made exactly one native request and polled on the
+    documented cadence rather than reading just once.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.membership_reads = 0
+        self.vdf_delay_reads = 0
+        self.vdf_ready = False
+
+    def arm_delay(self, delay_reads):
+        """Schedule the VDF write to land after ``delay_reads`` missed reads."""
+        self.vdf_delay_reads = delay_reads
+        self.vdf_ready = False
+        self.membership_reads = 0
+
+    def __call__(self, argv, **kwargs):
+        if argv and argv[0] == "systemd-run":
+            self.calls.append(list(argv))
+            # The CLI success returns before its session has flushed the VDF.
+            return self._done(argv, 0, "", "")
+        return super().__call__(argv, **kwargs)
+
+    def _library_membership_probe(self, reader, library_path):
+        # Delegate membership reads through the worker's own reader so the
+        # deferred write lands at the requested read count, not at wall time.
+        if not self.vdf_ready:
+            if self.membership_reads >= self.vdf_delay_reads:
+                self.vdf_ready = True
+            self.membership_reads += 1
+            if self.vdf_ready:
+                self._write_vdf()
+        return reader(library_path)
+
+
 class FormatTests(WorkerTestCase):
     def test_format_retypes_only_p1_and_formats_only_the_reserve(self):
         self.runner.mounted, self.runner.mount_target = True, self.mount_dir
@@ -524,12 +565,35 @@ class ConnectedTests(WorkerTestCase):
         self.assertTrue((self.mount_dir / "SteamLibrary" / "steamapps").is_dir())
 
 
+class FakeClock:
+    """A deterministic monotonic clock whose only advance is an explicit sleep.
+
+    Worker tests inject this so ``_await_membership`` can be driven through its
+    poll loop without any real waiting.  Each recorded sleep is applied to the
+    clock, so time advances exactly the amounts the worker requested.
+    """
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class SteamTests(WorkerTestCase):
     def _mount_plan(self):
         self.runner.table = table(tf_card.RESERVE_CONNECTED)
         self.runner.children = WorkerRunner._children(tf_card.RESERVE_CONNECTED)
         self.runner.blkid_values = {"UUID": LINUX_FS_UUID, "TYPE": "ext4"}
         return self._plan("mount")
+
+    def _member_path(self):
+        return self.home / ".local" / "share" / "Steam" / "config" / "libraryfolders.vdf"
 
     def _write_membership(self):
         """Record ``SteamLibrary`` in the account's own libraryfolders.vdf."""
@@ -606,6 +670,89 @@ class SteamTests(WorkerTestCase):
         code = self._worker(self._plan("mount"), runner=runner).run()
         self.assertEqual(code, 0)
         status = self._status()
+        self.assertFalse(status["library_requested"])
+        self.assertTrue(status["library_registered"])
+        self.assertFalse(status["library_pending"])
+        self.assertEqual(len(runner.ran("systemd-run")), 1)
+
+    def test_a_delayed_vdf_write_is_confirmed_by_bounded_polling(self):
+        """The incident: CLI 0 returns before the VDF, but a poll catches it."""
+        runner = self._card_runner(DelayedVdfRunner())
+        runner.steam_running = True
+        runner.table = table(tf_card.RESERVE_CONNECTED)
+        runner.children = WorkerRunner._children(tf_card.RESERVE_CONNECTED)
+        runner.blkid_values = {"UUID": LINUX_FS_UUID, "TYPE": "ext4"}
+        runner.arm_delay(3)
+        clock = FakeClock()
+        worker = self._worker(self._plan("mount"), runner=runner)
+        real_member = worker._library_member
+        runner.vdf_path = self.home / ".local" / "share" / "Steam" / "steamapps"
+
+        def delayed_member(library_path):
+            return runner._library_membership_probe(real_member, library_path)
+
+        worker._library_member = delayed_member
+        worker._clock = clock
+        worker._sleep = clock.sleep
+        code = worker.run()
+        self.assertEqual(code, 0)
+        status = self._status()
+        self.assertTrue(status["library_requested"])
+        self.assertTrue(status["library_registered"])
+        self.assertFalse(status["library_pending"])
+        # Exactly one native request; the confirmation came from polling.
+        self.assertEqual(len(runner.ran("systemd-run")), 1)
+        self.assertGreater(len(clock.sleeps), 0)
+        for recorded in clock.sleeps:
+            self.assertEqual(recorded, tf_worker.VDF_CONFIRM_POLL)
+        self.assertLessEqual(clock.now, tf_worker.VDF_CONFIRM_WINDOW)
+
+    def test_a_missing_vdf_is_honestly_pending_after_the_window(self):
+        runner = self._card_runner(DelayedVdfRunner())
+        runner.steam_running = True
+        runner.table = table(tf_card.RESERVE_CONNECTED)
+        runner.children = WorkerRunner._children(tf_card.RESERVE_CONNECTED)
+        runner.blkid_values = {"UUID": LINUX_FS_UUID, "TYPE": "ext4"}
+        # Never written: the CLI succeeds, but membership never appears.
+        runner.arm_delay(10 ** 9)
+        clock = FakeClock()
+        worker = self._worker(self._plan("mount"), runner=runner)
+        real_member = worker._library_member
+        runner.vdf_path = self.home / ".local" / "share" / "Steam" / "steamapps"
+
+        def delayed_member(library_path):
+            return runner._library_membership_probe(real_member, library_path)
+
+        worker._library_member = delayed_member
+        worker._clock = clock
+        worker._sleep = clock.sleep
+        code = worker.run()
+        self.assertEqual(code, 0)
+        status = self._status()
+        self.assertTrue(status["library_requested"])
+        self.assertFalse(status["library_registered"])
+        self.assertTrue(status["library_pending"])
+        # The worker waited exactly the bounded window, not forever.
+        self.assertAlmostEqual(clock.now, tf_worker.VDF_CONFIRM_WINDOW)
+        self.assertEqual(len(runner.ran("systemd-run")), 1)
+
+    def test_a_failed_cli_reads_membership_once_without_waiting(self):
+        runner = self._card_runner(FailingRequestRunner())
+        runner.steam_running = True
+        runner.table = table(tf_card.RESERVE_CONNECTED)
+        runner.children = WorkerRunner._children(tf_card.RESERVE_CONNECTED)
+        runner.blkid_values = {"UUID": LINUX_FS_UUID, "TYPE": "ext4"}
+        clock = FakeClock()
+        worker = self._worker(self._plan("mount"), runner=runner)
+        worker._clock = clock
+        worker._sleep = clock.sleep
+        code = worker.run()
+        self.assertEqual(code, 0)
+        # A CLI failure must not enter the confirmation wait at all.
+        self.assertEqual(clock.sleeps, [])
+        self.assertEqual(clock.now, 0.0)
+        status = self._status()
+        # The one immediate read still sees the VDF the model wrote.
         self.assertFalse(status["library_requested"])
         self.assertTrue(status["library_registered"])
         self.assertFalse(status["library_pending"])
