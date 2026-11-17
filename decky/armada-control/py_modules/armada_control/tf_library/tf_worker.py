@@ -55,6 +55,8 @@ STEAM_UID = 1000
 MKFS_TIMEOUT = 600
 HELPER_TIMEOUT = 120
 STEAM_TIMEOUT = 120
+VDF_CONFIRM_WINDOW = 5.0
+VDF_CONFIRM_POLL = 0.25
 MOUNT_POLLS = 40
 MOUNT_POLL_DELAY = 0.5
 LIBRARY_NAME = "SteamLibrary"
@@ -109,8 +111,10 @@ class TfWorker:
     def __init__(self, plan, status_path=None, log_path=None, runner=subprocess.run,
                  sysfs_dir=Path("/sys"), runtime_dir=service.DEFAULT_TF_RUNTIME,
                  checkpoint_dir=service.DEFAULT_TF_CHECKPOINT, helper=AUTOMOUNT_HELPER,
-                 steam_bin=STEAM_BIN, steam_uid=STEAM_UID):
+                 steam_bin=STEAM_BIN, steam_uid=STEAM_UID, clock=time.monotonic, sleep=time.sleep):
         self._plan = plan if isinstance(plan, dict) else {}
+        self._clock = clock
+        self._sleep = sleep
         self._status_path = status_path
         self._log_path = log_path
         self._runner = runner
@@ -474,13 +478,38 @@ class TfWorker:
                 "--setenv=XDG_RUNTIME_DIR=/run/user/%d" % self._steam_uid,
                 self._steam_bin, "-ifrunning", url]
         result = self._run(argv, check=False, timeout=STEAM_TIMEOUT)
-        requested = result is not None and result.returncode == 0
+        cli_ok = result is not None and result.returncode == 0
         # A CLI success only means Steam was asked; membership is re-read after
-        # the attempt and is the sole determinant of ``library_registered``.
-        registered = self._library_member(library_path)
-        self._update(library_requested=requested, library_registered=registered,
+        # the attempt and is the sole determinant of ``library_registered``.  A
+        # native ``steam`` exit 0 returns before its user session has flushed the
+        # VDF, so a success gets one bounded wait (monotonic deadline, immediate
+        # first read, fixed 250 ms polls) for the write to become visible.  A CLI
+        # failure is read exactly once and never waits, so it cannot stall the
+        # worker to paper over a broken environment.
+        if cli_ok:
+            registered = self._await_membership(library_path)
+        else:
+            registered = self._library_member(library_path)
+        self._update(library_requested=cli_ok, library_registered=registered,
                      library_pending=not registered,
                      detail="" if registered else "the library request could not be confirmed")
+
+    def _await_membership(self, library_path):
+        """Poll for the VDF membership with a monotonic deadline.
+
+        The first read happens immediately; subsequent reads are spaced by
+        ``VDF_CONFIRM_POLL`` and never cross the monotonic deadline set from
+        ``VDF_CONFIRM_WINDOW``.  The clock and sleep are injected so tests run
+        without real waiting.
+        """
+        deadline = self._clock() + VDF_CONFIRM_WINDOW
+        while True:
+            if self._library_member(library_path):
+                return True
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return False
+            self._sleep(min(VDF_CONFIRM_POLL, remaining))
 
     def _steam_running(self):
         try:
