@@ -1483,7 +1483,8 @@ const layoutEditorJs = transpile(
   if (!url) throw new Error(`LayoutEditor.tsx imports an unstubbed module: ${specifier}`);
   return `from "${url}"`;
 });
-const { LayoutEditor } = await import(asDataUrl(layoutEditorJs));
+const layoutEditorModule = await import(asDataUrl(layoutEditorJs + "\nexport { controlName };\n"));
+const { LayoutEditor, controlName: editorControlName } = layoutEditorModule;
 
 const editorButton = (runtime, label) =>
   findAll(
@@ -1761,4 +1762,64 @@ resetPageFixtures();
   assert.equal(pageCalls.updates.length, 1, "no extra generic update call");
   result.runtime.unmount();
 }
+// --- Regression: stock labels stay English while custom labels pass through ---
+resetPageFixtures();
+editorState.endLayoutEditing();
+const stockControls = [
+  { id: "btn_back", kind: "button", output: "back", label: "返回", x: 0.05, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "btn_start", kind: "button", output: "start", label: "开始", x: 0.15, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "btn_guide", kind: "button", output: "guide", label: "左侧栏", x: 0.25, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "btn_qam", kind: "button", output: "qam", label: "右侧栏", x: 0.35, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "custom_back", kind: "button", output: "back", label: "返回", x: 0.45, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "btn_back_custom", kind: "button", output: "back", label: "My menu", x: 0.55, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "ps_face", kind: "button", output: "y", label: "△", x: 0.65, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "switch_face", kind: "button", output: "a", label: "B", x: 0.75, y: 0.5, w: 0.08, h: 0.08 },
+];
+{
+  for (const control of stockControls.slice(0, 4)) {
+    assert.strictEqual(editorControlName(control, (key, vars) => touch("en", key, vars)), touch("en", "editor.control." + control.output), `${control.id} resolves its stock English label`);
+  }
+  for (const control of stockControls.slice(4)) {
+    assert.strictEqual(editorControlName(control, (key, vars) => touch("en", key, vars)), control.label, `${control.id} resolves its label`);
+  }
+}
+resetPageFixtures();
+editorState.endLayoutEditing();
+
+// --- Regression: a failed page load still opens the editor inspector ---
+resetPageFixtures();
+{
+  const original = pageHandlers.get_touch_state;
+  pageHandlers.get_touch_state = () => Promise.reject(new Error("load failed regression"));
+  let loadEditor;
+  try {
+    loadEditor = await mountPage("en", LayoutEditor);
+    await settle();
+  } finally {
+    pageHandlers.get_touch_state = original;
+  }
+  assert.ok(editorStyleOf(loadEditor, "inspector"), "the inspector is shown even though loading failed");
+  assert.ok(propStrings(loadEditor.tree).some((text) => text.includes("load failed regression")), "the load failure message is visible");
+  loadEditor.unmount();
+}
+resetPageFixtures();
+editorState.endLayoutEditing();
+
+// --- Regression: a failed quick-save surfaces the backend error ---
+resetPageFixtures();
+editorState.endLayoutEditing();
+{
+  const saveEditor = await mountEditor();
+  assert.ok(editorStyleOf(saveEditor, "strip"), "the quick-save strip starts collapsed");
+  editorButton(saveEditor, touch("en", "editor.save")).props.onClick();
+  await settle();
+  assert.equal(pendingSaves.length, 1, "one preset save is on the wire");
+  await completePresetSave(pendingSaves[0], { fail: true });
+  assert.ok(editorStyleOf(saveEditor, "inspector"), "the inspector opens after a failed quick save");
+  assert.ok(propStrings(saveEditor.tree).some((text) => text.includes("backend rejected the preset save")), "the backend rejection message is visible");
+  saveEditor.unmount();
+  assert.equal(pendingSaves.length, 0, "the failed save left no queue entry");
+}
+resetPageFixtures();
+editorState.endLayoutEditing();
 console.log("Touch integration tests passed: prefixed RPCs, the shared mutation queue, global lifecycle, tab mount, the single touch page, accepted work across remounts, and an editor save that outlives its editor");

@@ -2130,7 +2130,10 @@ class Daemon:
         if self.capturing and self.engine is not None and self.sink is not None:
             events = self.engine.tick(now)
             if events:
-                self.sink.emit(events)
+                try:
+                    self.sink.emit(events)
+                except Exception as exc:
+                    self._device_error(exc)
 
         self._queue_visual()
         self._flush_visual(now)

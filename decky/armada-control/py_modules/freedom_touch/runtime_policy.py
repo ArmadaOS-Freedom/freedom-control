@@ -400,11 +400,16 @@ def validate_settings(raw):
     # A document written before the catalog changed may still name one of the
     # retired built-ins.  Its saved layout belonged to that ergonomics, so keep
     # it as a preserved legacy custom preset and fall back to the default
-    # active preset instead of resetting the user's geometry.
+    # active preset instead of resetting the user's geometry.  A custom preset
+    # that legitimately reuses the retired id takes precedence: keep it as the
+    # active selection and only migrate when no custom entry matches.
     retired = active_id in RETIRED_PRESET_IDS
     if retired:
-        retired_id = active_id
-        active_id = DEFAULT_PRESET_ID
+        if any(preset["id"] == active_id for preset in custom_presets):
+            retired = False
+        else:
+            retired_id = active_id
+            active_id = DEFAULT_PRESET_ID
 
     active = None
     for preset in preset_catalog(custom_presets):

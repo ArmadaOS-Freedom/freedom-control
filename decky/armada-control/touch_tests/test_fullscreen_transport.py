@@ -50,6 +50,37 @@ def test_actual_daemon_idle():
         h.daemon.shutdown()
 
 
+def test_actual_daemon_tick_sink_emit_failure_recovers():
+    h = Harness()
+    try:
+        _emit_move(h)
+        assert h.daemon.capturing is True
+        assert h.sink.closed == 0
+
+        real_emit = h.sink.emit
+        failing = {"armed": True}
+
+        def flaky_emit(events):
+            if failing["armed"]:
+                failing["armed"] = False
+                raise RuntimeError("idle tick emit failed")
+            return real_emit(events)
+
+        h.sink.emit = flaky_emit
+        h.now += 0.06
+        h.daemon.tick(h.now)
+
+        assert h.daemon.capturing is False
+        assert h.daemon.sink is None
+        assert h.sink.closed >= 1
+        assert getattr(h.source, "closed", False) is True
+        assert h.daemon._stop is False
+        assert "touch" in h.daemon._failures
+        assert "idle tick emit failed" in h.daemon._failures["touch"]
+    finally:
+        h.daemon.shutdown()
+
+
 def test_menu_release():
     h = Harness()
     try:

@@ -90,6 +90,18 @@ const clamp = (value: number, min: number, max: number): number =>
 const describeError = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+// Stock utility buttons ship with these exact Chinese labels; when the
+// current label still matches, prefer the localized canonical text so an
+// English/other-locale user does not see the raw Chinese string. Custom
+// labels and console-specific face labels fall through untouched.
+type StockUtility = { output: string; aliases: readonly string[] };
+const STOCK_UTILITY_LABELS: readonly StockUtility[] = [
+  { output: "back", aliases: ["返回"] },
+  { output: "start", aliases: ["开始"] },
+  { output: "guide", aliases: ["左侧栏"] },
+  { output: "qam", aliases: ["右侧栏"] },
+];
+
 const controlName = (control: Control, text: TextFn): string => {
   if (control.kind === "stick") {
     return control.output === "right"
@@ -104,8 +116,24 @@ const controlName = (control: Control, text: TextFn): string => {
       ? text("editor.control.rightPad")
       : text("editor.control.leftPad");
   }
-  if (control.kind === "button" && control.label && control.label.trim()) {
-    return control.label.trim();
+  if (control.kind === "button") {
+    const trimmed = control.label ? control.label.trim() : "";
+    const stock = STOCK_UTILITY_LABELS.find(
+      (entry) =>
+        control.id === "btn_" + entry.output &&
+        entry.output === control.output &&
+        trimmed.length > 0 &&
+        entry.aliases.includes(trimmed),
+    );
+    if (stock) {
+      const key = BUTTON_KEYS[stock.output];
+      if (key) {
+        return text(key);
+      }
+    }
+    if (trimmed) {
+      return trimmed;
+    }
   }
   const key = BUTTON_KEYS[control.output];
   if (key) {
@@ -581,6 +609,15 @@ export function LayoutEditor() {
     };
   }, []);
 
+  // An error hidden inside the initial collapsed strip would leave the user
+  // with no visible feedback and no obvious way to open Tools. Auto-expand
+  // the inspector whenever a load or save error lands.
+  useEffect(() => {
+    if (loadError || error) {
+      setCollapsed(false);
+    }
+  }, [loadError, error]);
+
   useLayoutEffect(() => {
     const root = rootDomRef.current;
     if (!root) {
@@ -603,6 +640,11 @@ export function LayoutEditor() {
         Math.abs(previous.width - next.width) > coordinateEPS ||
         Math.abs(previous.height - next.height) > coordinateEPS
       ) {
+        // Rotation/resize: drop any in-flight gesture and its captured
+        // group baseline before re-normalizing, so a frozen drag cannot
+        // restore the pre-rotation stick heights.
+        clearGestureCaptures();
+        setPressedId(null);
         setDraft((current) =>
           current ? normalizeCircularSticks(current, next) : current,
         );

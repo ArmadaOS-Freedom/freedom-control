@@ -224,6 +224,53 @@ class RetiredPresetRoundtripTest(unittest.TestCase):
         self.assertEqual(migrated["dpad_mode"], "eight_way")
         self.assertEqual(migrated["base_preset_id"], DEFAULT_PRESET_ID)
 
+    def test_retired_ids_reused_as_custom_active_survive(self):
+        for retired_id in RETIRED_PRESET_IDS:
+            with self.subTest(retired_id=retired_id):
+                custom_layout = layout_mod.validate_layout(
+                    layout_mod.tablet_standard_layout()
+                )
+                custom = {
+                    "id": retired_id,
+                    "name": "My %s" % retired_id,
+                    "layout": custom_layout,
+                    "scale": 1.3,
+                    "dpad_mode": "eight_way",
+                    "base_preset_id": DEFAULT_PRESET_ID,
+                }
+                raw = _base_raw(
+                    retired_id,
+                    layout=custom_layout,
+                    scale=1.3,
+                    dpad_mode="eight_way",
+                    custom_presets=[custom],
+                )
+                once = validate_settings(raw)
+                twice = validate_settings(once)
+                third = validate_settings(twice)
+
+                self.assertEqual(once, twice)
+                self.assertEqual(twice, third)
+                self.assertEqual(once["active_preset_id"], retired_id)
+                self.assertEqual(once["layout"], custom_layout)
+                self.assertAlmostEqual(once["scale"], 1.3)
+                self.assertEqual(once["dpad_mode"], "eight_way")
+
+                ids = [p["id"] for p in once["custom_presets"]]
+                self.assertEqual(ids, [retired_id])
+                self.assertNotIn(LEGACY_PRESET_ID, ids)
+                self.assertFalse(
+                    any(id_.startswith(LEGACY_PRESET_ID) for id_ in ids)
+                )
+
+                preserved = once["custom_presets"][0]
+                self.assertEqual(preserved["id"], retired_id)
+                self.assertEqual(preserved["name"], "My %s" % retired_id)
+                self.assertEqual(preserved["layout"], custom_layout)
+                self.assertAlmostEqual(preserved["scale"], 1.3)
+                self.assertEqual(preserved["dpad_mode"], "eight_way")
+                self.assertEqual(preserved["base_preset_id"], DEFAULT_PRESET_ID)
+
     def test_retired_ids_not_in_catalog(self):
         from py_modules.freedom_touch.presets import preset_catalog
 
