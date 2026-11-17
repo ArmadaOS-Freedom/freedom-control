@@ -3,14 +3,18 @@
 The catalog is defined once in Python; the frontend receives it through the
 plugin state and must never keep a second copy of these layouts.  Every getter
 returns freshly copied objects so callers cannot mutate the catalog.
+
+The built-in presets are the console families the overlay ships with.  Each
+one names itself as its own base, so a saved custom preset can always be
+traced back to the template it was edited from.
 """
 
 import copy
 
 from py_modules.freedom_touch.layout import (
-    tablet_compact_layout,
+    ps_layout,
+    switch_layout,
     tablet_standard_layout,
-    tablet_trackpads_layout,
 )
 
 DEFAULT_PRESET_ID = "tablet_standard"
@@ -18,22 +22,33 @@ LEGACY_PRESET_ID = "custom_legacy"
 LEGACY_PRESET_NAME = "原布局"
 CUSTOM_NAME_MAX_LENGTH = 48
 
+DPAD_MODES = ("four_way", "eight_way")
+DEFAULT_DPAD_MODE = "four_way"
+
 BUILTIN_PRESET_IDS = (
     "tablet_standard",
+    "ps",
+    "switch",
+)
+
+BUILTIN_PRESET_NAMES = (
+    "平板默认（Xbox）",
+    "PS",
+    "Switch",
+)
+
+# Earlier releases shipped these two ids.  They are no longer catalog entries,
+# but a saved selection of one is migrated to a preserved legacy custom preset
+# rather than resetting the user's geometry.
+RETIRED_PRESET_IDS = (
     "tablet_compact",
     "tablet_trackpads",
 )
 
-BUILTIN_PRESET_NAMES = (
-    "平板标准",
-    "平板紧凑",
-    "触摸板优先",
-)
-
 _BUILTIN_SPECS = (
-    ("tablet_standard", "平板标准", tablet_standard_layout, 1.0),
-    ("tablet_compact", "平板紧凑", tablet_compact_layout, 0.95),
-    ("tablet_trackpads", "触摸板优先", tablet_trackpads_layout, 1.0),
+    ("tablet_standard", "平板默认（Xbox）", tablet_standard_layout, 1.0),
+    ("ps", "PS", ps_layout, 1.0),
+    ("switch", "Switch", switch_layout, 1.0),
 )
 
 
@@ -47,6 +62,8 @@ def builtin_presets():
             "builtin": True,
             "layout": factory(),
             "scale": scale,
+            "dpad_mode": DEFAULT_DPAD_MODE,
+            "base_preset_id": preset_id,
         }
         for preset_id, name, factory, scale in _BUILTIN_SPECS
     ]
@@ -64,6 +81,8 @@ def preset_catalog(custom_presets=()):
                 "builtin": False,
                 "layout": copy.deepcopy(preset["layout"]),
                 "scale": preset["scale"],
+                "dpad_mode": preset["dpad_mode"],
+                "base_preset_id": preset["base_preset_id"],
             }
         )
     return catalog

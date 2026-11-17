@@ -42,6 +42,8 @@ DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
 
 _HEX_COLOR = re.compile(r"#[0-9A-Fa-f]{6}\Z")
+_BUTTON_COLORS = ("white", "black")
+DEFAULT_BUTTON_COLOR = "white"
 
 
 def _log(text):
@@ -106,6 +108,16 @@ def parse_message(payload):
     if not isinstance(edge_swipes, bool):
         raise ValueError("edge_swipes must be a boolean")
 
+    right_stick_fullscreen = payload.get("right_stick_fullscreen", False)
+    if not isinstance(right_stick_fullscreen, bool):
+        raise ValueError("right_stick_fullscreen must be a boolean")
+
+    # Missing palette is the legacy white default; a present value must be
+    # exactly "white" or "black" (no trimming, no aliasing, no bools).
+    button_color = payload.get("button_color", DEFAULT_BUTTON_COLOR)
+    if not isinstance(button_color, str) or button_color not in _BUTTON_COLORS:
+        raise ValueError("button_color must be white or black")
+
     bubble_raw = payload.get("bubble", collapse.default_bubble())
     if not isinstance(bubble_raw, dict):
         raise ValueError("bubble must be an object")
@@ -155,6 +167,8 @@ def parse_message(payload):
         "mode": mode,
         "chrome": chrome,
         "edge_swipes": edge_swipes,
+        "right_stick_fullscreen": right_stick_fullscreen,
+        "button_color": button_color,
         "bubble": bubble,
         "layout": layout,
         "snapshot": {"active": active, "controls": controls},
@@ -207,6 +221,8 @@ def _default_message():
         "mode": "expanded",
         "chrome": False,
         "edge_swipes": False,
+        "right_stick_fullscreen": False,
+        "button_color": DEFAULT_BUTTON_COLOR,
         "bubble": collapse.default_bubble(),
         "layout": layout,
         "snapshot": {"active": False, "controls": controls},

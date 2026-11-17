@@ -9,16 +9,32 @@ contact events.
 
 import math
 
-from py_modules.freedom_touch.layout import default_layout, validate_layout
+from py_modules.freedom_touch.layout import (
+    default_layout,
+    tablet_compact_layout,
+    tablet_trackpads_layout,
+    validate_layout,
+)
 from py_modules.freedom_touch.presets import (
     BUILTIN_PRESET_IDS,
     BUILTIN_PRESET_NAMES,
     CUSTOM_NAME_MAX_LENGTH,
+    DEFAULT_DPAD_MODE,
     DEFAULT_PRESET_ID,
+    DPAD_MODES,
     LEGACY_PRESET_ID,
     LEGACY_PRESET_NAME,
+    RETIRED_PRESET_IDS,
     preset_catalog,
 )
+
+# Retired built-in ids that a saved active selection may still name, mapped to
+# the layout factory that produced their ergonomics.  These factories are
+# helper exports only; they are never catalog entries again.
+_RETIRED_LAYOUT_FACTORIES = {
+    "tablet_compact": tablet_compact_layout,
+    "tablet_trackpads": tablet_trackpads_layout,
+}
 
 COMPOSITE_IFACE = "org.shadowblip.Input.CompositeDevice"
 COMPOSITE_NAME = "Freedom Touch Controller"
@@ -46,6 +62,11 @@ DEFAULT_DEADZONE = 0.1
 DEFAULT_HAPTICS_ENABLED = True
 # 25 percent maps to the historical 0x4000 magnitude.
 DEFAULT_HAPTICS_STRENGTH = 25
+DEFAULT_RIGHT_STICK_FULLSCREEN = False
+# The control body palette.  Documents written before this field existed keep
+# the historical white chrome; the setting is global, not per preset.
+DEFAULT_BUTTON_COLOR = "white"
+BUTTON_COLORS = ("white", "black")
 
 MIN_OPACITY = 0.15
 MAX_OPACITY = 1.0
@@ -177,6 +198,16 @@ def _options(raw):
     if not isinstance(edge_swipes, bool):
         raise ValueError("edge_swipes must be a boolean")
 
+    button_color = raw.get("button_color", DEFAULT_BUTTON_COLOR)
+    if not isinstance(button_color, str) or button_color not in BUTTON_COLORS:
+        raise ValueError(
+            "button_color must be one of: %s" % (", ".join(BUTTON_COLORS),)
+        )
+
+    edge_swipes = raw.get("edge_swipes", False)
+    if not isinstance(edge_swipes, bool):
+        raise ValueError("edge_swipes must be a boolean")
+
     haptics_enabled = raw.get("haptics_enabled", DEFAULT_HAPTICS_ENABLED)
     if not isinstance(haptics_enabled, bool):
         raise ValueError("haptics_enabled must be a boolean")
@@ -186,13 +217,28 @@ def _options(raw):
         "haptics_strength",
     )
 
+    dpad_mode = raw.get("dpad_mode", DEFAULT_DPAD_MODE)
+    if not isinstance(dpad_mode, str) or dpad_mode not in DPAD_MODES:
+        raise ValueError(
+            "dpad_mode must be one of: %s" % (", ".join(DPAD_MODES),)
+        )
+
+    right_stick_fullscreen = raw.get(
+        "right_stick_fullscreen", DEFAULT_RIGHT_STICK_FULLSCREEN
+    )
+    if not isinstance(right_stick_fullscreen, bool):
+        raise ValueError("right_stick_fullscreen must be a boolean")
+
     return {
         "enabled": enabled,
         "opacity": opacity,
         "deadzone": deadzone,
+        "button_color": button_color,
         "edge_swipes": edge_swipes,
         "haptics_enabled": haptics_enabled,
         "haptics_strength": haptics_strength,
+        "dpad_mode": dpad_mode,
+        "right_stick_fullscreen": right_stick_fullscreen,
     }
 
 
@@ -208,12 +254,27 @@ def _preset_name(value):
     return name
 
 
-def _custom_presets(raw):
+def _custom_presets(raw, default_mode=DEFAULT_DPAD_MODE):
+    """Return canonical custom presets.
+
+    ``dpad_mode`` and ``base_preset_id`` were added later.  Entries written
+    before that keep working: a missing mode inherits *default_mode* (the
+    document's own top-level mode) and a missing base becomes the tablet
+    default.  An explicit but unsupported value is always rejected, including
+    the retired preset ids, which were never valid bases.
+    """
+
     if not isinstance(raw, (list, tuple)):
         raise ValueError("custom_presets must be a list")
 
+    # Loading existing data and validating a new save are two different rules:
+    # a custom preset's id may never collide with a built-in id, and two
+    # custom presets may not share an id or a name, but a custom name *may*
+    # be spelled like a built-in.  Users who saved "PS" or "Switch" before
+    # those became built-ins would otherwise lose access to their file; the
+    # save coordinator (not this loader) rejects NEW such names.
     seen_ids = set(BUILTIN_PRESET_IDS)
-    seen_names = set(BUILTIN_PRESET_NAMES)
+    seen_names = set()
     canonical = []
     for item in raw:
         if not isinstance(item, dict):
@@ -238,6 +299,22 @@ def _custom_presets(raw):
         if not MIN_SCALE <= scale <= MAX_SCALE:
             raise ValueError("preset scale is out of range")
 
+        dpad_mode = item.get("dpad_mode", default_mode)
+        if not isinstance(dpad_mode, str) or dpad_mode not in DPAD_MODES:
+            raise ValueError(
+                "preset dpad_mode must be one of: %s"
+                % (", ".join(DPAD_MODES),)
+            )
+
+        base_preset_id = item.get("base_preset_id", DEFAULT_PRESET_ID)
+        if (
+            not isinstance(base_preset_id, str)
+            or base_preset_id not in BUILTIN_PRESET_IDS
+        ):
+            raise ValueError(
+                "preset base_preset_id must be a built-in preset id"
+            )
+
         if "layout" not in item:
             raise ValueError("custom preset is missing layout")
         layout = validate_layout(item["layout"])
@@ -248,6 +325,8 @@ def _custom_presets(raw):
                 "name": name,
                 "layout": layout,
                 "scale": scale,
+                "dpad_mode": dpad_mode,
+                "base_preset_id": base_preset_id,
             }
         )
     return canonical
@@ -270,6 +349,8 @@ def _migrate_legacy_settings(raw):
                 "name": LEGACY_PRESET_NAME,
                 "layout": legacy_layout,
                 "scale": old_scale,
+                "dpad_mode": options["dpad_mode"],
+                "base_preset_id": DEFAULT_PRESET_ID,
             }
         )
 
@@ -279,9 +360,12 @@ def _migrate_legacy_settings(raw):
         "opacity": options["opacity"],
         "scale": DEFAULT_SCALE,
         "deadzone": options["deadzone"],
+        "button_color": options["button_color"],
         "edge_swipes": options["edge_swipes"],
         "haptics_enabled": options["haptics_enabled"],
         "haptics_strength": options["haptics_strength"],
+        "dpad_mode": options["dpad_mode"],
+        "right_stick_fullscreen": options["right_stick_fullscreen"],
         "layout": standard,
         "active_preset_id": DEFAULT_PRESET_ID,
         "custom_presets": custom_presets,
@@ -304,11 +388,29 @@ def validate_settings(raw):
         raise ValueError("unsupported settings version: %r" % (version,))
 
     options = _options(raw)
-    custom_presets = _custom_presets(raw.get("custom_presets", []))
+    explicit_mode = "dpad_mode" in raw
+    custom_presets = _custom_presets(
+        raw.get("custom_presets", []), options["dpad_mode"]
+    )
 
     active_id = raw.get("active_preset_id", DEFAULT_PRESET_ID)
     if not isinstance(active_id, str) or not active_id:
         raise ValueError("active_preset_id must be a non-empty string")
+
+    # A document written before the catalog changed may still name one of the
+    # retired built-ins.  Its saved layout belonged to that ergonomics, so keep
+    # it as a preserved legacy custom preset and fall back to the default
+    # active preset instead of resetting the user's geometry.  A custom preset
+    # that legitimately reuses the retired id takes precedence: keep it as the
+    # active selection and only migrate when no custom entry matches.
+    retired = active_id in RETIRED_PRESET_IDS
+    if retired:
+        if any(preset["id"] == active_id for preset in custom_presets):
+            retired = False
+        else:
+            retired_id = active_id
+            active_id = DEFAULT_PRESET_ID
+
     active = None
     for preset in preset_catalog(custom_presets):
         if preset["id"] == active_id:
@@ -317,23 +419,79 @@ def validate_settings(raw):
     if active is None:
         raise ValueError("unknown active preset: %r" % (active_id,))
 
-    scale = _finite_number(raw.get("scale", active["scale"]), "scale")
-    if not MIN_SCALE <= scale <= MAX_SCALE:
-        raise ValueError("scale is out of range")
+    if retired:
+        if "layout" in raw:
+            saved_layout = validate_layout(raw["layout"])
+        else:
+            # No saved layout: fall back to the retired preset's own factory
+            # rather than silently adopting the standard layout.
+            saved_layout = validate_layout(
+                _RETIRED_LAYOUT_FACTORIES[retired_id]()
+            )
+        scale = _finite_number(raw.get("scale", active["scale"]), "scale")
+        if not MIN_SCALE <= scale <= MAX_SCALE:
+            raise ValueError("scale is out of range")
 
-    if "layout" in raw:
-        layout = validate_layout(raw["layout"])
+        legacy_id = LEGACY_PRESET_ID
+        used_ids = {preset["id"] for preset in custom_presets}
+        if legacy_id in used_ids:
+            suffix = 1
+            while "%s_%s" % (legacy_id, suffix) in used_ids:
+                suffix += 1
+            legacy_id = "%s_%s" % (legacy_id, suffix)
+        used_names = {preset["name"] for preset in custom_presets}
+        legacy_name = LEGACY_PRESET_NAME
+        suffix = 1
+        while legacy_name in used_names:
+            legacy_name = "%s %d" % (LEGACY_PRESET_NAME, suffix)
+            suffix += 1
+
+        custom_presets = list(custom_presets)
+        custom_presets.append(
+            {
+                "id": legacy_id,
+                "name": legacy_name,
+                "layout": saved_layout,
+                "scale": scale,
+                "dpad_mode": options["dpad_mode"],
+                # The retired id is not a valid base; anchor the preserved
+                # preset at the canonical tablet default so the canonical
+                # state validates again on re-read.
+                "base_preset_id": DEFAULT_PRESET_ID,
+            }
+        )
+        layout = saved_layout
     else:
-        layout = validate_layout(active["layout"])
+        scale = _finite_number(raw.get("scale", active["scale"]), "scale")
+        if not MIN_SCALE <= scale <= MAX_SCALE:
+            raise ValueError("scale is out of range")
+
+        # An explicit layout is authoritative even when empty: the editor can
+        # delete every component and the empty list must survive a reload.
+        if "layout" in raw:
+            layout = validate_layout(raw["layout"])
+        else:
+            layout = validate_layout(active["layout"])
+
+    # The top-level mode is the runtime effective value.  An explicit one wins;
+    # otherwise the active preset's own mode is the sensible default.
+    dpad_mode = (
+        options["dpad_mode"]
+        if explicit_mode
+        else active.get("dpad_mode", DEFAULT_DPAD_MODE)
+    )
 
     return {
         "enabled": options["enabled"],
         "opacity": options["opacity"],
         "scale": scale,
         "deadzone": options["deadzone"],
+        "button_color": options["button_color"],
         "edge_swipes": options["edge_swipes"],
         "haptics_enabled": options["haptics_enabled"],
         "haptics_strength": options["haptics_strength"],
+        "dpad_mode": dpad_mode,
+        "right_stick_fullscreen": options["right_stick_fullscreen"],
         "layout": layout,
         "active_preset_id": active_id,
         "custom_presets": custom_presets,

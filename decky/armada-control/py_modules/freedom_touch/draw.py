@@ -18,12 +18,62 @@ gi.require_foreign("cairo")
 from gi.repository import Pango, PangoCairo  # noqa: E402
 
 from . import collapse  # noqa: E402
+from . import layout as _layout  # noqa: E402
 
 WHITE = (1.0, 1.0, 1.0)
+BLACK = (0.0, 0.0, 0.0)
 CYAN = (0.28, 0.86, 1.0)
 ABXY_OUTPUTS = frozenset({"a", "b", "x", "y"})
 MAX_OPACITY = 1.0
 MIN_OPACITY = 0.0
+
+# Two flat palettes selected by the message's ``button_color``.  "white" is
+# the unchanged historical appearance; "black" fills each control body so it
+# stays readable over a bright game while keeping light, crisp ink.  Every
+# alpha below is multiplied by the message opacity at draw time, and pressed
+# feedback stays CYAN in both palettes.
+PALETTES = {
+    "white": {
+        "body": WHITE,
+        "ink": WHITE,
+        "button": {"fill": 0.055, "stroke": 0.82, "text": 0.90},
+        "stick": {
+            "surface_fill": 0.045,
+            "surface_stroke": 0.72,
+            "thumb_fill": 0.10,
+            "thumb_stroke": 0.88,
+            "dot": 0.55,
+        },
+        "dpad": {"fill": 0.055, "stroke": 0.78},
+        "pad": {"fill": 0.04, "stroke": 0.62, "label": 0.34},
+        "pill": {"fill": 0.075, "stroke": 0.82, "label": 1.0},
+    },
+    "black": {
+        "body": BLACK,
+        "ink": WHITE,
+        "button": {"fill": 0.65, "stroke": 0.92, "text": 0.96},
+        "stick": {
+            "surface_fill": 0.45,
+            "surface_stroke": 0.82,
+            "thumb_fill": 0.65,
+            "thumb_stroke": 0.92,
+            "dot": 0.72,
+        },
+        "dpad": {"fill": 0.60, "stroke": 0.86},
+        "pad": {"fill": 0.45, "stroke": 0.72, "label": 0.55},
+        "pill": {"fill": 0.60, "stroke": 0.90, "label": 1.0},
+    },
+}
+DEFAULT_PALETTE = "white"
+
+
+def _palette(message):
+    """Return the palette named by *message*; a legacy message means white."""
+
+    color = message.get("button_color")
+    if isinstance(color, str) and color in PALETTES:
+        return PALETTES[color]
+    return PALETTES[DEFAULT_PALETTE]
 
 
 def _clamp(value, minimum=0.0, maximum=1.0):
@@ -156,16 +206,19 @@ def _chrome_bubble(message):
     return bubble
 
 
-def _draw_collapse_pill(context, width, height, opacity):
+def _draw_collapse_pill(context, width, height, opacity, palette):
     """Draw the single expanded-mode pill with the existing Pango label."""
 
+    body = palette["body"]
+    ink = palette["ink"]
+    spec = palette["pill"]
     x, y, pill_width, pill_height = collapse.pill_rect(width, height)
     radius = min(pill_width, pill_height) / 2.0
     rounded_rectangle(context, x, y, pill_width, pill_height, radius)
     _fill_and_stroke(
         context,
-        (WHITE[0], WHITE[1], WHITE[2], 0.075 * opacity),
-        (WHITE[0], WHITE[1], WHITE[2], 0.82 * opacity),
+        (body[0], body[1], body[2], spec["fill"] * opacity),
+        (ink[0], ink[1], ink[2], spec["stroke"] * opacity),
         _line_width(width, height),
     )
     _label(
@@ -176,7 +229,8 @@ def _draw_collapse_pill(context, width, height, opacity):
         min(pill_height * 0.50, pill_width * 0.42),
         pill_width * 0.76,
         pill_height * 0.66,
-        opacity,
+        spec["label"] * opacity,
+        ink,
     )
 
 
@@ -254,26 +308,32 @@ def _draw_collapse_bubble(context, width, height, message, opacity):
     _draw_gamepad_icon(context, center_x, center_y, diameter, opacity)
 
 
-def _button_colors(pressed, opacity):
+def _button_colors(pressed, opacity, palette):
     if pressed:
+        # Pressed feedback is always the same cyan highlight on either body.
         return (
             (CYAN[0], CYAN[1], CYAN[2], 0.34 * opacity),
             (CYAN[0], CYAN[1], CYAN[2], 0.95 * opacity),
             WHITE,
             0.98 * opacity,
         )
+    body = palette["body"]
+    ink = palette["ink"]
+    spec = palette["button"]
     return (
-        (WHITE[0], WHITE[1], WHITE[2], 0.055 * opacity),
-        (WHITE[0], WHITE[1], WHITE[2], 0.82 * opacity),
-        WHITE,
-        0.90 * opacity,
+        (body[0], body[1], body[2], spec["fill"] * opacity),
+        (ink[0], ink[1], ink[2], spec["stroke"] * opacity),
+        ink,
+        spec["text"] * opacity,
     )
 
 
-def _draw_button(context, rect, control, state, opacity, line_width):
+def _draw_button(context, rect, control, state, opacity, line_width, palette):
     x, y, width, height = rect
     pressed = bool(state.get("pressed"))
-    fill, stroke, text_color, text_alpha = _button_colors(pressed, opacity)
+    fill, stroke, text_color, text_alpha = _button_colors(
+        pressed, opacity, palette
+    )
     label = control.get("label") or str(control.get("output", "")).upper()
 
     if control.get("output") in ABXY_OUTPUTS:
@@ -301,17 +361,20 @@ def _draw_button(context, rect, control, state, opacity, line_width):
     )
 
 
-def _draw_stick(context, rect, state, opacity, line_width):
+def _draw_stick(context, rect, state, opacity, line_width, palette):
     x, y, width, height = rect
     pressed = bool(state.get("pressed"))
+    body = palette["body"]
+    ink = palette["ink"]
+    spec = palette["stick"]
     center_x = x + width / 2.0
     center_y = y + height / 2.0
 
     _ellipse_path(context, x, y, width, height)
     _fill_and_stroke(
         context,
-        (WHITE[0], WHITE[1], WHITE[2], 0.045 * opacity),
-        (WHITE[0], WHITE[1], WHITE[2], 0.72 * opacity),
+        (body[0], body[1], body[2], spec["surface_fill"] * opacity),
+        (ink[0], ink[1], ink[2], spec["surface_stroke"] * opacity),
         line_width,
     )
 
@@ -327,8 +390,8 @@ def _draw_stick(context, rect, state, opacity, line_width):
         fill = (CYAN[0], CYAN[1], CYAN[2], 0.34 * opacity)
         stroke = (CYAN[0], CYAN[1], CYAN[2], 0.96 * opacity)
     else:
-        fill = (WHITE[0], WHITE[1], WHITE[2], 0.10 * opacity)
-        stroke = (WHITE[0], WHITE[1], WHITE[2], 0.88 * opacity)
+        fill = (body[0], body[1], body[2], spec["thumb_fill"] * opacity)
+        stroke = (ink[0], ink[1], ink[2], spec["thumb_stroke"] * opacity)
 
     context.new_sub_path()
     context.arc(thumb_x, thumb_y, radius, 0.0, math.tau)
@@ -336,7 +399,7 @@ def _draw_stick(context, rect, state, opacity, line_width):
 
     context.new_sub_path()
     context.arc(center_x, center_y, max(1.0, line_width * 0.9), 0.0, math.tau)
-    context.set_source_rgba(WHITE[0], WHITE[1], WHITE[2], 0.55 * opacity)
+    context.set_source_rgba(ink[0], ink[1], ink[2], spec["dot"] * opacity)
     context.fill()
 
 
@@ -360,15 +423,18 @@ def _cross_path(context, x, y, width, height, thickness):
     context.close_path()
 
 
-def _draw_dpad(context, rect, state, opacity, line_width):
+def _draw_dpad(context, rect, state, opacity, line_width, palette):
     x, y, width, height = rect
     pressed = bool(state.get("pressed"))
+    body = palette["body"]
+    ink = palette["ink"]
+    spec = palette["dpad"]
     thickness = min(width, height) * 0.36
     _cross_path(context, x, y, width, height, thickness)
     _fill_and_stroke(
         context,
-        (WHITE[0], WHITE[1], WHITE[2], 0.055 * opacity),
-        (WHITE[0], WHITE[1], WHITE[2], 0.78 * opacity),
+        (body[0], body[1], body[2], spec["fill"] * opacity),
+        (ink[0], ink[1], ink[2], spec["stroke"] * opacity),
         line_width,
     )
 
@@ -396,18 +462,23 @@ def _draw_dpad(context, rect, state, opacity, line_width):
     context.restore()
 
 
-def _draw_pad(context, rect, control, state, opacity, line_width):
+def _draw_pad(context, rect, control, state, opacity, line_width, palette):
     x, y, width, height = rect
     pressed = bool(state.get("pressed"))
+    body = palette["body"]
+    ink = palette["ink"]
+    spec = palette["pad"]
+    # Trackpads are large translucent surfaces, so their body stays lighter
+    # than a small button even in the black palette.
     border = (
         (CYAN[0], CYAN[1], CYAN[2], 0.92 * opacity)
         if pressed
-        else (WHITE[0], WHITE[1], WHITE[2], 0.62 * opacity)
+        else (ink[0], ink[1], ink[2], spec["stroke"] * opacity)
     )
     fill = (
         (CYAN[0], CYAN[1], CYAN[2], 0.075 * opacity)
         if pressed
-        else (WHITE[0], WHITE[1], WHITE[2], 0.04 * opacity)
+        else (body[0], body[1], body[2], spec["fill"] * opacity)
     )
     radius = min(width, height) * 0.18
     rounded_rectangle(context, x, y, width, height, radius)
@@ -422,7 +493,8 @@ def _draw_pad(context, rect, control, state, opacity, line_width):
         min(width, height) * 0.16,
         width * 0.30,
         height * 0.24,
-        0.34 * opacity,
+        spec["label"] * opacity,
+        ink,
     )
 
     if not pressed:
@@ -448,7 +520,9 @@ def draw_controls(context, width, height, message):
     """Draw *message* onto a cairo context of *width* x *height* pixels.
 
     The target is cleared to transparent first so a hidden frame cannot leave
-    stale pixels in a dedicated overlay plane.
+    stale pixels in a dedicated overlay plane.  The optional ``button_color``
+    field selects the "white" (default, legacy) or "black" control palette and
+    only affects colours: geometry, hit rectangles and opacity are identical.
     """
 
     try:
@@ -476,6 +550,8 @@ def draw_controls(context, width, height, message):
     if opacity <= 0.0:
         return
 
+    palette = _palette(message)
+
     # Collapsed mode replaces the whole controller with the single bubble.
     if message.get("mode") == "collapsed":
         if message.get("chrome") is True:
@@ -502,6 +578,8 @@ def draw_controls(context, width, height, message):
     for control in ordered:
         if not isinstance(control, dict):
             continue
+        if message.get("right_stick_fullscreen") is True and control.get("kind") == "stick" and control.get("output") == "right":
+            continue
         try:
             x = float(control["x"]) * width
             y = float(control["y"]) * height
@@ -516,19 +594,36 @@ def draw_controls(context, width, height, message):
         state = controls.get(control_id, {})
         if not isinstance(state, dict):
             state = {}
-        rect = (x, y, control_width, control_height)
         kind = control.get("kind")
+        if kind == "stick":
+            try:
+                projected = _layout.circular_stick_rect(
+                    control, width / height
+                )
+                x = float(projected["x"]) * width
+                y = float(projected["y"]) * height
+                control_width = float(projected["w"]) * width
+                control_height = float(projected["h"]) * height
+            except (KeyError, TypeError, ValueError):
+                continue
+            if control_width <= 0.0 or control_height <= 0.0:
+                continue
+        rect = (x, y, control_width, control_height)
 
         context.save()
         if kind == "button":
-            _draw_button(context, rect, control, state, opacity, line_width)
+            _draw_button(
+                context, rect, control, state, opacity, line_width, palette
+            )
         elif kind == "stick":
-            _draw_stick(context, rect, state, opacity, line_width)
+            _draw_stick(context, rect, state, opacity, line_width, palette)
         elif kind == "dpad":
-            _draw_dpad(context, rect, state, opacity, line_width)
+            _draw_dpad(context, rect, state, opacity, line_width, palette)
         elif kind == "pad":
-            _draw_pad(context, rect, control, state, opacity, line_width)
+            _draw_pad(
+                context, rect, control, state, opacity, line_width, palette
+            )
         context.restore()
 
     if message.get("chrome") is True:
-        _draw_collapse_pill(context, width, height, opacity)
+        _draw_collapse_pill(context, width, height, opacity, palette)

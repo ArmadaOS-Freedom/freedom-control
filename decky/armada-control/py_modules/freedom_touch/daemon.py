@@ -488,6 +488,10 @@ class Daemon:
             or settings["deadzone"] != self.settings["deadzone"]
             or bool(settings.get("edge_swipes", False))
             != bool(self.settings.get("edge_swipes", False))
+            or settings.get("dpad_mode")
+            != self.settings.get("dpad_mode")
+            or bool(settings.get("right_stick_fullscreen", False))
+            != bool(self.settings.get("right_stick_fullscreen", False))
         )
         if changed:
             # Input hit targets must be the exact rectangles the overlay
@@ -515,6 +519,10 @@ class Daemon:
             settings["deadzone"],
             bool(settings.get("edge_swipes", False)),
             self.aspect_ratio,
+            dpad_mode=settings["dpad_mode"],
+            right_stick_fullscreen=bool(
+                settings.get("right_stick_fullscreen", False)
+            ),
         )
 
     def _apply_controls_visibility(self, visible, now):
@@ -1906,6 +1914,10 @@ class Daemon:
             "mode": mode,
             "chrome": chrome,
             "edge_swipes": bool(self.settings.get("edge_swipes", False)),
+            "right_stick_fullscreen": bool(
+                self.settings.get("right_stick_fullscreen", False)
+            ),
+            "button_color": self.settings["button_color"],
             "bubble": dict(self.bubble),
             "layout": self.effective_controls,
             "snapshot": snapshot,
@@ -2115,6 +2127,13 @@ class Daemon:
         now, checkpoint = self._advance(now, checkpoint)
         self._settle_collapse()
         self._dispatch_passive(now)
+        if self.capturing and self.engine is not None and self.sink is not None:
+            events = self.engine.tick(now)
+            if events:
+                try:
+                    self.sink.emit(events)
+                except Exception as exc:
+                    self._device_error(exc)
 
         self._queue_visual()
         self._flush_visual(now)

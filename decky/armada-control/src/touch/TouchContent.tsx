@@ -1,14 +1,18 @@
 import {
   ButtonItem,
+  ConfirmModal,
+  DropdownItem,
   Navigation,
   PanelSection,
   PanelSectionRow,
   SliderField,
   ToggleField,
+  showModal,
 } from "@decky/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
+  deletePreset,
   fetchState,
   previewHaptics,
   selectPreset,
@@ -20,7 +24,12 @@ import { beginLayoutEditing } from "./editor-state";
 import type { Language, TranslationKey } from "./i18n";
 import { TOUCH_LAYOUT_ROUTE } from "./route";
 import { touchText } from "./touch_i18n";
-import type { OptionsPatch, PluginState } from "./types";
+import type {
+  ButtonColor,
+  OptionsPatch,
+  PluginState,
+  Preset,
+} from "./types";
 
 // One page, one scrolling column. The page keeps its natural height so the
 // Controller's own tab panel stays the only scroll owner; nothing here clips.
@@ -29,6 +38,75 @@ const pageStyles = `
     box-sizing: border-box;
     width: 100%;
     min-width: 0;
+  }
+  .touch-controller-page .touch-page-row {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+  }
+  .touch-controller-page .touch-preset-grid {
+    box-sizing: border-box;
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+    align-items: stretch;
+  }
+  .touch-controller-page .touch-preset-grid.touch-preset-grid--deletable {
+    grid-template-columns: minmax(0, 1fr) 88px;
+  }
+  .touch-controller-page .touch-preset-select,
+  .touch-controller-page .touch-preset-delete {
+    box-sizing: border-box;
+    min-width: 0;
+    width: 100%;
+    display: block;
+  }
+  .touch-controller-page .touch-preset-delete button {
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .touch-controller-page .touch-preset-select-inner {
+    box-sizing: border-box;
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 8px;
+    min-height: 20px;
+  }
+  .touch-controller-page .touch-preset-name {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+    line-height: 1.3;
+  }
+  .touch-controller-page .touch-preset-meta {
+    display: block;
+    flex: 0 0 auto;
+    font-size: 11px;
+    line-height: 1.3;
+    white-space: nowrap;
+  }
+  .touch-controller-page .touch-preset-delete-label {
+    display: block;
+    font-size: 12px;
+    line-height: 1.3;
+    white-space: nowrap;
+  }
+  .touch-controller-page .touch-tip {
+    font-size: 12px;
+    line-height: 1.45;
+    opacity: 0.8;
+    word-break: break-word;
   }
 `;
 
@@ -46,30 +124,6 @@ const errorStyle: CSSProperties = {
   wordBreak: "break-word",
 };
 
-const presetRowStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 10,
-  width: "100%",
-  minHeight: 44,
-};
-
-const presetNameStyle: CSSProperties = {
-  fontSize: 16,
-  lineHeight: 1.3,
-  flex: "1 1 auto",
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const presetMetaStyle: CSSProperties = {
-  flex: "0 0 auto",
-  fontSize: 12,
-  opacity: 0.9,
-};
 
 type TextFn = (
   key: TranslationKey,
@@ -300,6 +354,31 @@ export function TouchContent({ locale }: { locale: Language }) {
     }
   };
 
+  const promptDeletePreset = (preset: Preset) => {
+    if (!aliveRef.current || preset.builtin) {
+      return;
+    }
+    showModal(
+      <ConfirmModal
+        strTitle={text("layout.deleteConfirmTitle")}
+        strDescription={text("layout.deleteConfirm", { name: preset.name })}
+        strOKButtonText={text("layout.deleteConfirmOk")}
+        strCancelButtonText={text("editor.cancel")}
+        bDestructiveWarning
+        onOK={() => {
+          if (!aliveRef.current) {
+            return;
+          }
+          void runMutation(
+            () => deletePreset(preset.id),
+            (error) =>
+              text("error.deletePreset", { error: describeError(error) }),
+          );
+        }}
+      />,
+    );
+  };
+
   const openEditor = () => {
     if (busyRef.current) {
       return;
@@ -372,6 +451,17 @@ export function TouchContent({ locale }: { locale: Language }) {
             </PanelSectionRow>
             <PanelSectionRow>
               <ToggleField
+                label={text("common.fullscreenRightStick")}
+                checked={state.settings.right_stick_fullscreen ?? false}
+                disabled={!state.settings.enabled || busy}
+                onChange={(value) =>
+                  changeOptions({ right_stick_fullscreen: value })
+                }
+              />
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+              <ToggleField
                 label={text("common.haptics")}
                 description={text("common.hapticsDescription")}
                 checked={state.settings.haptics_enabled}
@@ -392,23 +482,26 @@ export function TouchContent({ locale }: { locale: Language }) {
               />
             </PanelSectionRow>
             <PanelSectionRow>
-              <ButtonItem
-                layout="below"
-                disabled={previewDisabled}
-                onClick={() => void tryHaptics()}
-              >
-                <span
-                  style={{
-                    fontSize: 16,
-                    fontWeight: 700,
-                    opacity: previewDisabled ? 0.55 : 1,
-                  }}
+              <div className="touch-page-row">
+                <ButtonItem
+                  layout="below"
+                  childrenContainerWidth="max"
+                  disabled={previewDisabled}
+                  onClick={() => void tryHaptics()}
                 >
-                  {previewing
-                    ? text("common.previewing")
-                    : text("common.preview")}
-                </span>
-              </ButtonItem>
+                  <span
+                    style={{
+                      fontSize: 14,
+                      fontWeight: 600,
+                      opacity: previewDisabled ? 0.55 : 1,
+                    }}
+                  >
+                    {previewing
+                      ? text("common.previewing")
+                      : text("common.preview")}
+                  </span>
+                </ButtonItem>
+              </div>
             </PanelSectionRow>
             {state.settings.enabled &&
             state.status.haptics_available === false ? (
@@ -426,6 +519,19 @@ export function TouchContent({ locale }: { locale: Language }) {
 
       {state ? (
         <PanelSection title={text("common.display")}>
+          <PanelSectionRow>
+            <DropdownItem
+              label={text("common.color")}
+              selectedOption={state.settings.button_color ?? "white"}
+              rgOptions={[
+                { label: text("common.colorWhite"), data: "white" },
+                { label: text("common.colorBlack"), data: "black" },
+              ]}
+              onChange={(option) =>
+                changeOptions({ button_color: option.data as ButtonColor })
+              }
+            />
+          </PanelSectionRow>
           <PanelSectionRow>
             <SliderField
               label={text("common.opacity")}
@@ -461,14 +567,17 @@ export function TouchContent({ locale }: { locale: Language }) {
 
       <PanelSection title={text("layout.title")}>
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={openEditor}>
-            <span style={{ fontSize: 16, fontWeight: 700 }}>
-              {text("layout.openEditor")}
-            </span>
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <div style={hintStyle}>{text("layout.openEditorHint")}</div>
+          <div className="touch-page-row">
+            <ButtonItem
+              layout="below"
+              childrenContainerWidth="max"
+              onClick={openEditor}
+            >
+              <span style={{ fontSize: 14, fontWeight: 600 }}>
+                {text("layout.openEditor")}
+              </span>
+            </ButtonItem>
+          </div>
         </PanelSectionRow>
         <PanelSectionRow>
           <div style={hintStyle}>
@@ -480,42 +589,66 @@ export function TouchContent({ locale }: { locale: Language }) {
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
-          <div style={hintStyle}>{text("layout.presetsHint")}</div>
+          <div className="touch-tip">{text("layout.openEditorHint")}</div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <div className="touch-tip">{text("layout.presetsHint")}</div>
         </PanelSectionRow>
         {presets.length > 0 ? (
           presets.map((preset) => {
             const selected = preset.id === activePresetId;
+            const deletable = !preset.builtin;
             return (
               <PanelSectionRow key={preset.id}>
-                <ButtonItem
-                  layout="below"
-                  onClick={() => choosePreset(preset.id)}
+                <div
+                  className={`touch-page-row touch-preset-grid${
+                    deletable ? " touch-preset-grid--deletable" : ""
+                  }`}
                 >
-                  <span style={presetRowStyle}>
-                    <span
-                      style={{
-                        ...presetNameStyle,
-                        fontWeight: selected ? 700 : 500,
-                      }}
+                  <div className="touch-preset-select">
+                    <ButtonItem
+                      layout="below"
+                      childrenContainerWidth="max"
+                      onClick={() => choosePreset(preset.id)}
                     >
-                      {preset.name}
-                    </span>
-                    <span
-                      style={{
-                        ...presetMetaStyle,
-                        color: selected
-                          ? "#8ce99a"
-                          : "rgba(255,255,255,0.72)",
-                      }}
-                    >
-                      {selected
-                        ? text("common.selected")
-                        : preset.builtin
-                          ? text("common.builtin")
-                          : text("common.custom")}
-                    </span>
-                  </span>
-                </ButtonItem>
+                      <span className="touch-preset-select-inner">
+                        <span
+                          className="touch-preset-name"
+                          style={{ fontWeight: selected ? 700 : 500 }}
+                        >
+                          {preset.name}
+                        </span>
+                        <span
+                          className="touch-preset-meta"
+                          style={{
+                            color: selected
+                              ? "#8ce99a"
+                              : "rgba(255,255,255,0.72)",
+                          }}
+                        >
+                          {selected
+                            ? text("common.selected")
+                            : preset.builtin
+                              ? text("common.builtin")
+                              : text("common.custom")}
+                        </span>
+                      </span>
+                    </ButtonItem>
+                  </div>
+                  {deletable ? (
+                    <div className="touch-preset-delete">
+                      <ButtonItem
+                        layout="below"
+                        childrenContainerWidth="max"
+                        onClick={() => promptDeletePreset(preset)}
+                      >
+                        <span className="touch-preset-delete-label">
+                          {text("layout.delete")}
+                        </span>
+                      </ButtonItem>
+                    </div>
+                  ) : null}
+                </div>
               </PanelSectionRow>
             );
           })

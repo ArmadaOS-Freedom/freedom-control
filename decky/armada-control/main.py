@@ -253,8 +253,21 @@ class Plugin:
     async def select_touch_preset(self, preset_id):
         return await self._touch.select_preset(preset_id)
 
-    async def save_touch_preset(self, name, layout, scale, overwrite_id=None):
-        return await self._touch.save_preset(name, layout, scale, overwrite_id)
+    async def save_touch_preset(
+        self,
+        name,
+        layout,
+        scale,
+        overwrite_id=None,
+        dpad_mode=None,
+        base_preset_id=None,
+    ):
+        return await self._touch.save_preset(
+            name, layout, scale, overwrite_id, dpad_mode, base_preset_id
+        )
+
+    async def delete_touch_preset(self, preset_id):
+        return await self._touch.delete_preset(preset_id)
 
     async def reset_touch_layout(self):
         return await self._touch.reset_layout()

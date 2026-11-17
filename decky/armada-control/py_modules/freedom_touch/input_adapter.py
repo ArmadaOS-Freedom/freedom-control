@@ -116,11 +116,17 @@ class InputSink:
         self._synced = True
 
     def emit(self, events):
-        """Apply one engine frame and emit at most one uinput SYN.
+        """Apply one engine frame and emit SYN-separated uinput batches.
 
-        Writes are coalesced by ``(event_type, code)`` so repeated changes in a
-        frame collapse to the final value.  Values identical to the last
-        flushed state are not written.
+        Buttons, the trigger axes that mirror them, and the ABS_HAT0X/Y
+        D-pad switches are digital and keep their input order.  When a code
+        reverses inside one frame, the earlier value is committed under its
+        own SYN before the later value is recorded, so a rapid
+        press/release/press or release/press sequence cannot collapse into
+        one final state.  Duplicates of the still-current value are skipped.
+        Only the analog stick axes are coalesced by ``(event_type, code)``
+        to their final value for the whole frame.  Independent codes may
+        share one SYN.
 
         A native chord that the bridge rejects with an explicit ``False``
         raises ``RuntimeError``; a raised bridge exception propagates
@@ -128,7 +134,7 @@ class InputSink:
         here sends a synthetic release, because the chord owns its own.
         """
 
-        pending = {}
+        entries = []
         for event in events or ():
             try:
                 kind = event[0]
@@ -138,11 +144,11 @@ class InputSink:
             if kind == "button":
                 if len(event) < 3:
                     continue
-                self._button_event(event[1], bool(event[2]), pending)
+                self._button_event(event[1], bool(event[2]), entries)
             elif kind == "axis":
                 if len(event) < 3:
                     continue
-                self._axis_event(event[1], event[2], pending)
+                self._axis_event(event[1], event[2], entries)
             elif kind == "pad":
                 if len(event) < 3:
                     continue
@@ -156,13 +162,32 @@ class InputSink:
                 if chord is not None:
                     self._send_chord([chord])
 
+        digital = []
+        seen = {}
+        analog = {}
+        for key, value, is_digital in entries:
+            if not is_digital:
+                analog[key] = value
+                continue
+            if key in seen and seen[key] != value:
+                # Commit the previous state of this code now, so the
+                # following opposite value gets its own SYN at frame end.
+                if digital:
+                    self._flush(dict(digital))
+                digital = []
+                seen = {}
+            digital.append((key, value))
+            seen[key] = value
+
+        pending = dict(digital)
+        pending.update(analog)
         if pending:
             self._flush(pending)
         # A frame whose SYN never reached the kernel still owes one, even
         # when this frame carries no new value at all.
         self._sync_if_needed()
 
-    def _button_event(self, output, pressed, pending):
+    def _button_event(self, output, pressed, entries):
         if output == "qam":
             if pressed:
                 self._send_chord([QAM_CHORD])
@@ -170,26 +195,27 @@ class InputSink:
 
         trigger = _TRIGGER_AXES.get(output)
         if trigger is not None:
-            pending[(EV_ABS, trigger)] = 255 if pressed else 0
+            entries.append(((EV_ABS, trigger), 255 if pressed else 0, True))
             return
 
         code = _BUTTON_CODES.get(output)
         if code is not None:
-            pending[(EV_KEY, code)] = 1 if pressed else 0
+            entries.append(((EV_KEY, code), 1 if pressed else 0, True))
 
-    def _axis_event(self, name, value, pending):
+    def _axis_event(self, name, value, entries):
         number = _float(value)
         if number is None:
             return
         code = _STICK_AXES.get(name)
         if code is not None:
             scaled = int(round(_clamp(number, -1.0, 1.0) * _STICK_MAX))
-        else:
-            code = _DPAD_AXES.get(name)
-            if code is None:
-                return
-            scaled = int(round(_clamp(number, -1.0, 1.0)))
-        pending[(EV_ABS, code)] = scaled
+            entries.append(((EV_ABS, code), scaled, False))
+            return
+        code = _DPAD_AXES.get(name)
+        if code is None:
+            return
+        scaled = int(round(_clamp(number, -1.0, 1.0)))
+        entries.append(((EV_ABS, code), scaled, True))
 
     def _pad_event(self, side, payload):
         cap = PAD_MOTION_CAPS.get(side)

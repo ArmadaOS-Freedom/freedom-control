@@ -1,6 +1,7 @@
 import { callable } from "@decky/api";
 import type {
   Control,
+  DpadMode,
   OptionsPatch,
   Settings,
   State,
@@ -23,9 +24,14 @@ const savePresetCall = callable<
     layout: Control[],
     scale: number,
     overwriteId: string | null,
+    dpadMode: DpadMode | null,
+    basePresetId: string | null,
   ],
   State
 >("save_touch_preset");
+const deletePresetCall = callable<[id: string], State>(
+  "delete_touch_preset",
+);
 const resetLayoutCall = callable<[], State>("reset_touch_layout");
 const heartbeatCall = callable<[appid: string | null], Status>(
   "touch_heartbeat",
@@ -140,9 +146,20 @@ export const savePreset = (
   name: string,
   layout: Control[],
   scale: number,
-  overwriteId: string | null,
+  overwriteId: string | null = null,
+  dpadMode: DpadMode | null = null,
+  basePresetId: string | null = null,
 ): Promise<State> =>
-  enqueue(() => savePresetCall(name, layout, scale, overwriteId));
+  enqueue(() =>
+    savePresetCall(name, layout, scale, overwriteId, dpadMode, basePresetId),
+  );
+
+/**
+ * Delete a custom preset. Built-in and unknown ids are rejected by the backend;
+ * deleting the active custom falls back to the tablet_standard template.
+ */
+export const deletePreset = (id: string): Promise<State> =>
+  enqueue(() => deletePresetCall(id));
 
 export const resetLayout = (): Promise<State> =>
   enqueue(() => resetLayoutCall());

@@ -1,6 +1,6 @@
 # Third-party notices
 
-The Freedom Touch touch controller is integrated into the Freedom Control Decky plugin as its touch backend. It contains original work by danyi and the ArmadaOS Freedom contributors, and adaptations of the following projects. The integrated runtime keeps the original author and source; the plugin around it is licensed under GPL-2.0.
+The Freedom Touch touch controller is integrated into the Freedom Control Decky plugin as its touch backend. It contains original work by danyi and the ArmadaOS Freedom contributors, integrates the author's retained 0.1.6 revisions, and includes adaptations of the following projects. The integrated runtime keeps the original author and source; the plugin around it is licensed under GPL-2.0.
 
 - **Decky Plugin Template**, SteamDeckHomebrew contributors: project scaffolding and build configuration, BSD-3-Clause. The original license text is retained in `licenses/freedom-touch/Decky-template-BSD-3-Clause.txt`.
 - **Decky API and UI**, SteamDeckHomebrew contributors: frontend integration libraries under LGPL-2.1; license texts are retained in `licenses/freedom-touch/`.

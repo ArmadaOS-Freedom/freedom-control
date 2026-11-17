@@ -85,7 +85,9 @@ assert.deepEqual(await touchApi.fetchState(), state);
 assert.deepEqual(await touchApi.setSettings({ version: 2 }), state);
 assert.deepEqual(await touchApi.updateOptions({ opacity: 0.5 }), state);
 assert.deepEqual(await touchApi.selectPreset("preset-2"), state);
-assert.deepEqual(await touchApi.savePreset("Mine", layout, 1, null), state);
+assert.deepEqual(await touchApi.savePreset("Mine", layout, 1, null, null, null), state);
+assert.deepEqual(await touchApi.savePreset("Eight", layout, 1, "custom-1", "eight_way", "ps"), state);
+assert.deepEqual(await touchApi.deletePreset("custom-1"), state);
 assert.deepEqual(await touchApi.resetLayout(), state);
 assert.deepEqual(await touchApi.sendHeartbeat("42"), state);
 assert.deepEqual(await touchApi.sendHeartbeat(null), state);
@@ -98,7 +100,9 @@ assert.deepEqual(globalThis.__touchCalls, [
   ["set_touch_settings", { version: 2 }],
   ["update_touch_options", { opacity: 0.5 }],
   ["select_touch_preset", "preset-2"],
-  ["save_touch_preset", "Mine", layout, 1, null],
+  ["save_touch_preset", "Mine", layout, 1, null, null, null],
+  ["save_touch_preset", "Eight", layout, 1, "custom-1", "eight_way", "ps"],
+  ["delete_touch_preset", "custom-1"],
   ["reset_touch_layout"],
   ["touch_heartbeat", "42"],
   ["touch_heartbeat", null],
@@ -645,6 +649,13 @@ const pageHookRuntimeUrl = toModuleUrl(`
 `, "page-hooks.js");
 
 const pageUiStub = `export const ButtonItem = "ButtonItem";
+export const DialogButton = "DialogButton";
+export const Focusable = "Focusable";
+export const DropdownItem = "DropdownItem";
+export const ConfirmModal = "ConfirmModal";
+export const showModal = (element) => {
+  globalThis.__touchPage.modals.push(element);
+};
 export const Navigation = {
   Navigate: (path) => globalThis.__touchPage.navigations.push(path),
   NavigateBack: () => { globalThis.__touchPage.backNavigations += 1; },
@@ -653,6 +664,7 @@ export const Navigation = {
 export const PanelSection = "PanelSection";
 export const PanelSectionRow = "PanelSectionRow";
 export const SliderField = "SliderField";
+export const TextField = "TextField";
 export const ToggleField = "ToggleField";`;
 
 // The page talks to the shipped api module, only its transport is recorded, so
@@ -668,6 +680,7 @@ const pageTouchApiUrl = toModuleUrl(
   "page-touch-api.ts",
 );
 const pageApiStub = `export {
+  deletePreset,
   fetchState,
   previewHaptics,
   savePreset,
@@ -751,6 +764,7 @@ const pageCalls = {
   updates: [],
   presets: [],
   saves: [],
+  deletePresets: [],
   previews: 0,
   visible: [],
   heartbeats: [],
@@ -792,10 +806,18 @@ const pageHandlers = {
     };
     return Promise.resolve(clonePageState(livePageState));
   },
-  save_touch_preset: (name, savedLayout, scale, overwriteId) => {
-    pageCalls.saves.push({ name, layout: savedLayout, scale, overwriteId });
+  save_touch_preset: (name, savedLayout, scale, overwriteId, dpadMode, basePresetId) => {
+    pageCalls.saves.push({ name, layout: savedLayout, scale, overwriteId, dpadMode, basePresetId });
     return new Promise((resolve, reject) =>
-      pendingSaves.push({ name, layout: savedLayout, scale, overwriteId, resolve, reject }));
+      pendingSaves.push({ name, layout: savedLayout, scale, overwriteId, dpadMode, basePresetId, resolve, reject }));
+  },
+  delete_touch_preset: (id) => {
+    pageCalls.deletePresets.push(id);
+    livePageState = {
+      ...livePageState,
+      presets: livePageState.presets.filter((preset) => preset.id !== id),
+    };
+    return Promise.resolve(clonePageState(livePageState));
   },
   set_touch_controls_visible: (visible) => {
     pageCalls.visible.push(visible);
@@ -825,6 +847,7 @@ globalThis.__touchPage = {
   },
   heartbeats: pageCalls.heartbeats,
   navigations: pageCalls.navigations,
+  modals: [],
   backNavigations: 0,
   closedMenus: 0,
 };
@@ -878,6 +901,7 @@ const completePresetSave = async (entry, { fail = false } = {}) => {
     settings: {
       ...livePageState.settings,
       active_preset_id: id,
+      dpad_mode: entry.dpadMode ?? livePageState.settings.dpad_mode,
       layout: entry.layout.map((control) => ({ ...control })),
     },
     presets: [
@@ -887,6 +911,8 @@ const completePresetSave = async (entry, { fail = false } = {}) => {
         name: entry.name,
         layout: entry.layout.map((control) => ({ ...control })),
         scale: entry.scale,
+        dpad_mode: entry.dpadMode ?? livePageState.settings.dpad_mode,
+        base_preset_id: entry.basePresetId ?? livePageState.settings.active_preset_id,
         builtin: false,
       },
     ],
@@ -903,7 +929,9 @@ const resetPageFixtures = () => {
   pageCalls.updates.length = 0;
   pageCalls.presets.length = 0;
   pageCalls.saves.length = 0;
+  pageCalls.deletePresets.length = 0;
   pageCalls.visible.length = 0;
+  globalThis.__touchPage.modals.length = 0;
   pageCalls.fetches = 0;
   pageCalls.previews = 0;
   pageCalls.heartbeats.length = 0;
@@ -1423,7 +1451,10 @@ assert.equal(timers.intervals.size, 0, "no page keeps polling once every page is
 // The editor is the shipped component, mounted on the same hook runtime as the
 // page: its own effects, refs and re-renders run, the real api queue carries
 // its save, and the real editor-state module holds the global editing flag.
-const editorUiStub = `export const Navigation = {
+const editorUiStub = `export const DialogButton = "DialogButton";
+export const Focusable = "Focusable";
+export const SliderField = "SliderField";
+export const Navigation = {
   Navigate: (path) => globalThis.__touchPage.navigations.push(path),
   NavigateBack: () => { globalThis.__touchPage.backNavigations += 1; },
 };
@@ -1432,6 +1463,9 @@ export const TextField = "TextField";`;
 const editorStubUrls = {
   "@decky/ui": asDataUrl(editorUiStub),
   react: pageHookRuntimeUrl,
+  "react-dom": asDataUrl(
+    `export const createPortal = (node) => node;`,
+  ),
   "react/jsx-runtime": pageStubUrls["react/jsx-runtime"],
   "../hooks/useLocale": asDataUrl(
     `export const useLocale = () => globalThis.__touchControllerLocale;`,
@@ -1449,25 +1483,132 @@ const layoutEditorJs = transpile(
   if (!url) throw new Error(`LayoutEditor.tsx imports an unstubbed module: ${specifier}`);
   return `from "${url}"`;
 });
-const { default: LayoutEditor } = await import(asDataUrl(layoutEditorJs));
+const layoutEditorModule = await import(asDataUrl(layoutEditorJs + "\nexport { controlName };\n"));
+const { LayoutEditor, controlName: editorControlName } = layoutEditorModule;
 
 const editorButton = (runtime, label) =>
   findAll(
     runtime.tree,
-    (node) => node.type === "button" && stringsIn(node.props.children).includes(label),
+    (node) =>
+      (node.type === "button" || node.type === "DialogButton") &&
+      stringsIn(node.props.children).includes(label),
   )[0];
 
 const mountEditor = async () => {
   globalThis.__touchControllerLocale = "en";
   const runtime = mountPage("en", LayoutEditor);
   await settle();
-  assert.equal(runtime.tree.type, "div", "the editor renders its canvas");
+  assert.equal(runtime.tree.type, "Focusable", "the editor renders its canvas");
   assert.ok(
     editorButton(runtime, touch("en", "editor.save")),
     "the editor offers a save button",
   );
   return runtime;
 };
+
+// --- Regression: toolbar docks left/right and move labels name destination ---
+
+resetPageFixtures();
+editorState.endLayoutEditing();
+
+const editorStyleOf = (runtime, selector) => {
+  const node = findAll(
+    runtime.tree,
+    (candidate) => candidate.props && candidate.props["data-layout-editor"] === selector,
+  )[0];
+  return node ? node.props.style : null;
+};
+const editorMoveButton = (runtime) =>
+  findAll(
+    runtime.tree,
+    (node) =>
+      node.type === "button" || node.type === "DialogButton",
+  ).find((node) => node.props && node.props["data-layout-action"] === "move");
+
+{
+  const dockingEditor = await mountEditor();
+
+  // Collapsed strip starts docked left; move to right.
+  let strip = editorStyleOf(dockingEditor, "strip");
+  assert.equal(strip.left, 8, "collapsed strip docks left by default");
+  assert.equal(strip.top, 8, "collapsed strip anchors at the top");
+  assert.equal(strip.right, "auto", "collapsed strip leaves the right edge auto");
+  assert.deepEqual(stringsIn(editorMoveButton(dockingEditor).props.children), [
+    touch("en", "editor.moveRight"),
+  ], "collapsed strip move label names the right destination");
+
+  editorMoveButton(dockingEditor).props.onClick();
+  await settle();
+  strip = editorStyleOf(dockingEditor, "strip");
+  assert.equal(strip.right, 8, "collapsed strip moves to the right edge");
+  assert.equal(strip.left, "auto", "collapsed strip clears the left edge");
+  assert.deepEqual(stringsIn(editorMoveButton(dockingEditor).props.children), [
+    touch("en", "editor.moveLeft"),
+  ], "collapsed strip move label names the left destination");
+
+  // Expand on the right; inspector stays docked right.
+  const toolsButton = findAll(
+    dockingEditor.tree,
+    (node) => node.type === "button" || node.type === "DialogButton",
+  ).find((node) => node.props && node.props["data-layout-action"] === "tools");
+  toolsButton.props.onClick();
+  await settle();
+  let inspector = editorStyleOf(dockingEditor, "inspector");
+  assert.ok(inspector, "the expanded inspector is present");
+  assert.equal(inspector.right, 8, "expanding keeps the inspector on the right");
+  assert.equal(inspector.left, "auto", "expanded inspector clears the left edge");
+  assert.equal(inspector.top, 8, "expanded inspector anchors at the top");
+  assert.deepEqual(stringsIn(editorMoveButton(dockingEditor).props.children), [
+    touch("en", "editor.moveLeft"),
+  ], "expanded move label names the left destination");
+
+  // Move expanded to left.
+  editorMoveButton(dockingEditor).props.onClick();
+  await settle();
+  inspector = editorStyleOf(dockingEditor, "inspector");
+  assert.equal(inspector.left, 8, "expanded inspector moves to the left edge");
+  assert.equal(inspector.right, "auto", "expanded inspector clears the right edge");
+  assert.deepEqual(stringsIn(editorMoveButton(dockingEditor).props.children), [
+    touch("en", "editor.moveRight"),
+  ], "expanded move label names the right destination");
+
+  // Collapse retains left; strip still docked left.
+  const collapseNode = findAll(
+    dockingEditor.tree,
+    (node) => node.type === "button" || node.type === "DialogButton",
+  ).find((node) => node.props && node.props["data-layout-action"] === "collapse");
+  collapseNode.props.onClick();
+  await settle();
+  strip = editorStyleOf(dockingEditor, "strip");
+  assert.equal(strip.left, 8, "collapsing keeps the collapsed strip on the left");
+  assert.equal(strip.right, "auto", "collapsed strip clears the right edge");
+  assert.deepEqual(stringsIn(editorMoveButton(dockingEditor).props.children), [
+    touch("en", "editor.moveRight"),
+  ], "collapsed strip after collapse still names the right destination");
+
+  // Move back right from the strip.
+  editorMoveButton(dockingEditor).props.onClick();
+  await settle();
+  strip = editorStyleOf(dockingEditor, "strip");
+  assert.equal(strip.right, 8, "collapsed strip moves back to the right edge");
+  assert.equal(strip.left, "auto", "collapsed strip clears the left edge again");
+  assert.deepEqual(stringsIn(editorMoveButton(dockingEditor).props.children), [
+    touch("en", "editor.moveLeft"),
+  ], "collapsed strip move label names the left destination again");
+
+  // Old vertical labels are gone from the move button.
+  const moveLabel = stringsIn(editorMoveButton(dockingEditor).props.children).join(" ");
+  assert.ok(!moveLabel.includes("Move to top"), "old top label absent");
+  assert.ok(!moveLabel.includes("Move to bottom"), "old bottom label absent");
+  assert.ok(!moveLabel.includes("Move to center"), "old center label absent");
+
+  dockingEditor.unmount();
+  await settle();
+}
+
+// Reset fixtures and editing flag before the existing save regression tests.
+resetPageFixtures();
+editorState.endLayoutEditing();
 
 // --- Regression: a save finished after the editor left must not steer ------
 
@@ -1561,4 +1702,124 @@ afterFailureEditor.unmount();
 assert.equal(editorState.isLayoutEditing(), false, "the last editor out releases the flag");
 assert.equal(timers.intervals.size, 0, "the editor owns no timer of its own");
 
+resetPageFixtures();
+{
+  const result = await mountPollingPage();
+  const deleteText = touch("en", "layout.delete");
+  const mineRows = findAll(result.runtime.tree, (node) =>
+    node && node.type === "PanelSectionRow" && node.props && typeof node.props.children !== "undefined" &&
+    stringsIn(node.props.children).includes("Mine") &&
+    stringsIn(node.props.children).includes(deleteText));
+  assert.ok(mineRows.length > 0, "custom preset row 'Mine' with delete affordance exists");
+  const balancedRows = findAll(result.runtime.tree, (node) =>
+    node && node.type === "PanelSectionRow" && node.props && stringsIn(node.props.children).includes("Balanced") &&
+    stringsIn(node.props.children).includes(deleteText));
+  assert.equal(balancedRows.length, 0, "builtin preset row has no delete button");
+  const deleteButton = findAll(mineRows[0], (node) =>
+    node && node.type === "ButtonItem" && node.props && typeof node.props.onClick === "function" &&
+    stringsIn(node.props.children).includes(deleteText));
+  assert.ok(deleteButton.length > 0, "delete control is present in custom row");
+  assert.equal(globalThis.__touchPage.modals.length, 0, "no modal before delete click");
+  assert.equal(pageCalls.deletePresets.length, 0, "no delete RPC before delete click");
+  deleteButton[0].props.onClick();
+  await settle();
+  assert.equal(globalThis.__touchPage.modals.length, 1, "delete opens confirmation modal");
+  const modal = globalThis.__touchPage.modals[0];
+  assert.ok(modal, "modal element was stored");
+  const modalText = stringsIn(modal.props.children ?? modal.props.strDescription ?? "").join(" ");
+  assert.ok(modalText.includes("Mine"), "modal description names Mine");
+  assert.equal(pageCalls.deletePresets.length, 0, "delete waits for confirmation");
+  modal.props.onOK();
+  await settle();
+  assert.deepEqual(pageCalls.deletePresets, ["custom-1"], "confirmed delete called RPC once");
+  assert.equal(livePageState.presets.some((preset) => preset.id === "custom-1"), false, "custom-1 removed from live state");
+  const remainingMine = findAll(result.runtime.tree, (node) =>
+    node && node.type === "PanelSectionRow" && node.props && typeof node.props.children !== "undefined" &&
+    stringsIn(node.props.children).includes("Mine") &&
+    stringsIn(node.props.children).includes(deleteText));
+  assert.equal(remainingMine.length, 0, "removed preset row is gone");
+  result.runtime.unmount();
+}
+resetPageFixtures();
+{
+  const result = await mountPollingPage();
+  const colorDropdowns = findAll(result.runtime.tree, (node) =>
+    node && node.type === "DropdownItem" && node.props && node.props.label === touch("en", "common.color"));
+  assert.ok(colorDropdowns.length === 1, "exactly one color dropdown");
+  const dropdown = colorDropdowns[0];
+  assert.equal(dropdown.props.selectedOption, "white", "color defaults to white without stored value");
+  assert.equal(issuedPatches.length, 0, "no patch issued yet");
+  dropdown.props.onChange({ data: "black" });
+  await settle();
+  assert.deepEqual(issuedPatches, [{ button_color: "black" }], "color change issued exact patch");
+  assert.equal(pendingUpdates.length, 1, "exactly one write in flight");
+  await completeUpdate(pendingUpdates[0]);
+  const updated = findAll(result.runtime.tree, (node) =>
+    node && node.type === "DropdownItem" && node.props && node.props.label === touch("en", "common.color"));
+  assert.ok(updated.length === 1, "color dropdown still rendered after write");
+  assert.equal(updated[0].props.selectedOption, "black", "color selection reflects black");
+  assert.equal(livePageState.settings.button_color, "black", "live state records black");
+  assert.equal(pageCalls.updates.length, 1, "no extra generic update call");
+  result.runtime.unmount();
+}
+// --- Regression: stock labels stay English while custom labels pass through ---
+resetPageFixtures();
+editorState.endLayoutEditing();
+const stockControls = [
+  { id: "btn_back", kind: "button", output: "back", label: "返回", x: 0.05, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "btn_start", kind: "button", output: "start", label: "开始", x: 0.15, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "btn_guide", kind: "button", output: "guide", label: "左侧栏", x: 0.25, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "btn_qam", kind: "button", output: "qam", label: "右侧栏", x: 0.35, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "custom_back", kind: "button", output: "back", label: "返回", x: 0.45, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "btn_back_custom", kind: "button", output: "back", label: "My menu", x: 0.55, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "ps_face", kind: "button", output: "y", label: "△", x: 0.65, y: 0.5, w: 0.08, h: 0.08 },
+  { id: "switch_face", kind: "button", output: "a", label: "B", x: 0.75, y: 0.5, w: 0.08, h: 0.08 },
+];
+{
+  for (const control of stockControls.slice(0, 4)) {
+    assert.strictEqual(editorControlName(control, (key, vars) => touch("en", key, vars)), touch("en", "editor.control." + control.output), `${control.id} resolves its stock English label`);
+  }
+  for (const control of stockControls.slice(4)) {
+    assert.strictEqual(editorControlName(control, (key, vars) => touch("en", key, vars)), control.label, `${control.id} resolves its label`);
+  }
+}
+resetPageFixtures();
+editorState.endLayoutEditing();
+
+// --- Regression: a failed page load still opens the editor inspector ---
+resetPageFixtures();
+{
+  const original = pageHandlers.get_touch_state;
+  pageHandlers.get_touch_state = () => Promise.reject(new Error("load failed regression"));
+  let loadEditor;
+  try {
+    loadEditor = await mountPage("en", LayoutEditor);
+    await settle();
+  } finally {
+    pageHandlers.get_touch_state = original;
+  }
+  assert.ok(editorStyleOf(loadEditor, "inspector"), "the inspector is shown even though loading failed");
+  assert.ok(propStrings(loadEditor.tree).some((text) => text.includes("load failed regression")), "the load failure message is visible");
+  loadEditor.unmount();
+}
+resetPageFixtures();
+editorState.endLayoutEditing();
+
+// --- Regression: a failed quick-save surfaces the backend error ---
+resetPageFixtures();
+editorState.endLayoutEditing();
+{
+  const saveEditor = await mountEditor();
+  assert.ok(editorStyleOf(saveEditor, "strip"), "the quick-save strip starts collapsed");
+  editorButton(saveEditor, touch("en", "editor.save")).props.onClick();
+  await settle();
+  assert.equal(pendingSaves.length, 1, "one preset save is on the wire");
+  await completePresetSave(pendingSaves[0], { fail: true });
+  assert.ok(editorStyleOf(saveEditor, "inspector"), "the inspector opens after a failed quick save");
+  assert.ok(propStrings(saveEditor.tree).some((text) => text.includes("backend rejected the preset save")), "the backend rejection message is visible");
+  saveEditor.unmount();
+  assert.equal(pendingSaves.length, 0, "the failed save left no queue entry");
+}
+resetPageFixtures();
+editorState.endLayoutEditing();
 console.log("Touch integration tests passed: prefixed RPCs, the shared mutation queue, global lifecycle, tab mount, the single touch page, accepted work across remounts, and an editor save that outlives its editor");
