@@ -15,12 +15,17 @@ export interface Control {
   label?: string;
 }
 
+export type DpadMode = "four_way" | "eight_way";
+export type ButtonColor = "white" | "black";
+
 /** A user-created preset. The backend owns layout validation and ids. */
 export interface CustomPreset {
   id: string;
   name: string;
   layout: Control[];
   scale: number;
+  dpad_mode: DpadMode;
+  base_preset_id: string;
 }
 
 /** A catalog entry: builtin templates plus saved custom presets. */
@@ -40,6 +45,9 @@ export interface Settings {
   active_preset_id: string;
   custom_presets: CustomPreset[];
   layout: Control[];
+  dpad_mode: DpadMode;
+  button_color: ButtonColor;
+  right_stick_fullscreen?: boolean;
 }
 
 /** The only fields update_options accepts; every other field is left alone. */
@@ -51,6 +59,9 @@ export interface OptionsPatch {
   edge_swipes?: boolean;
   haptics_enabled?: boolean;
   haptics_strength?: number;
+  dpad_mode?: DpadMode;
+  button_color?: ButtonColor;
+  right_stick_fullscreen?: boolean;
 }
 
 export interface Status {

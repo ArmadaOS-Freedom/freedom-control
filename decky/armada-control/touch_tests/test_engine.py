@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from py_modules.freedom_touch.engine import TouchEngine
+from py_modules.freedom_touch.layout import circular_stick_rect
 
 EVENT_KINDS = {"button", "axis", "pad", "pad_press"}
 
@@ -139,7 +140,11 @@ class TouchEngineTests(unittest.TestCase):
         self.assertNotIn(("button", "a", True), engine.move(1, self.A[0], self.A[1], 0.3))
 
     def test_dpad_diagonal_reports_both_axes(self):
-        engine = self.active_engine()
+        engine = TouchEngine(
+            [dict(c) for c in self.CONTROLS],
+            dpad_mode="eight_way",
+        )
+        engine.set_active(True)
         engine.begin(1, self.DPAD[0], self.DPAD[1], 0.0)
         events = engine.move(1, 0.23, 0.62, 0.1)
         self.assertEqual(axis_value(events, "dx"), 1)
@@ -147,6 +152,42 @@ class TouchEngineTests(unittest.TestCase):
         events = engine.move(1, 0.23, 0.78, 0.2)
         self.assertEqual(axis_value(events, "dx"), 1)
         self.assertEqual(axis_value(events, "dy"), 1)
+
+    def test_dpad_eight_way_reports_cardinal_and_diagonal_axes(self):
+        # Eight-way keeps a diagonal leg diagonal instead of collapsing it
+        # onto the dominant axis.  Only this test requests the mode; every
+        # other dpad test above proves the four-way default is unchanged.
+        controls = [control("dpad_l", "dpad", 0.05, 0.60, 0.20, 0.20, "left")]
+        engine = TouchEngine(
+            [dict(item) for item in controls],
+            dpad_mode="eight_way",
+        )
+        engine.set_active(True)
+        engine.begin(1, 0.15, 0.70, 0.0)
+        # Upper-right sector: both axes fire.
+        events = engine.move(1, 0.23, 0.62, 0.1)
+        self.assertEqual(axis_value(events, "dx"), 1)
+        self.assertEqual(axis_value(events, "dy"), -1)
+        # Lower-right sector: both axes fire.
+        events = engine.move(1, 0.23, 0.78, 0.2)
+        self.assertEqual(axis_value(events, "dx"), 1)
+        self.assertEqual(axis_value(events, "dy"), 1)
+        # Pure cardinal right, no vertical component.
+        events = engine.move(1, 0.245, 0.70, 0.3)
+        self.assertEqual(axis_value(events, "dx"), 1)
+        self.assertEqual(axis_value(events, "dy"), 0)
+        # Inside the deadzone the mode never fabricates an axis.
+        events = engine.move(1, 0.15, 0.70, 0.4)
+        self.assertEqual(axis_value(events, "dx"), 0)
+        self.assertEqual(axis_value(events, "dy"), 0)
+        self.assertEqual(engine.dpad_mode, "eight_way")
+
+    def test_dpad_mode_defaults_to_four_way_and_rejects_unknown_modes(self):
+        engine = self.active_engine()
+        self.assertEqual(engine.dpad_mode, "four_way")
+        for bad in ("eight", "FOUR_WAY", "", None, 4, True):
+            with self.assertRaises(ValueError):
+                TouchEngine([dict(c) for c in self.CONTROLS], dpad_mode=bad)
 
     def test_pad_normalizes_coordinates_and_clamps(self):
         engine = self.active_engine()
@@ -166,24 +207,55 @@ class TouchEngineTests(unittest.TestCase):
         self.assertAlmostEqual(payload["x"], 1.0)
         self.assertAlmostEqual(payload["y"], 1.0)
 
-    def test_rectangular_stick_scales_each_axis_by_its_own_half(self):
-        engine = TouchEngine(
-            [control("stick_l", "stick", 0.1, 0.2, 0.2, 0.4, "left")],
-            deadzone=0.0,
+    def test_circular_stick_equal_physical_pixel_deflections(self):
+        # Untouched stick rect: canonical geometry is projected to a physical
+        # circle inside the engine, so equal device-space pixel offsets on
+        # either axis must produce equal-magnitude axis deflection.
+        width, height = 1600, 900
+        aspect = width / height
+        stick = control("stick_l", "stick", 0.1, 0.2, 0.2, 0.4, "left")
+        projected = circular_stick_rect(stick, aspect)
+        self.assertAlmostEqual(
+            projected["w"] * width, projected["h"] * height, places=6
         )
+        center_x = projected["x"] + projected["w"] / 2.0
+        center_y = projected["y"] + projected["h"] / 2.0
+        radius_px = projected["w"] * width / 2.0
+        # A quarter-radius physical pixel step on each axis.
+        delta_x = 0.25 * radius_px / width
+        delta_y = 0.25 * radius_px / height
+        self.assertAlmostEqual(delta_x * width, delta_y * height, places=6)
+
+        engine = TouchEngine([dict(stick)], aspect_ratio=aspect, deadzone=0.0)
         engine.set_active(True)
-        engine.begin(1, 0.2, 0.4, 0.0)
+        initial = engine.begin(1, center_x, center_y, 0.0)
+        self.assertEqual(axis_value(initial, "lx"), 0)
+        self.assertEqual(axis_value(initial, "ly"), 0)
 
-        # A tenth of the screen down is half of the .2 half-height.
-        vertical = engine.move(1, 0.2, 0.5, 0.1)
+        horizontal = engine.move(1, center_x + delta_x, center_y, 0.1)
+        vertical = engine.move(1, center_x, center_y + delta_y, 0.2)
+        self.assertAlmostEqual(axis_value(horizontal, "ly"), 0.0)
         self.assertAlmostEqual(axis_value(vertical, "lx"), 0.0)
-        self.assertAlmostEqual(axis_value(vertical, "ly"), 0.5)
+        self.assertAlmostEqual(
+            abs(axis_value(horizontal, "lx")),
+            abs(axis_value(vertical, "ly")),
+            places=6,
+        )
 
-        half_height = engine.move(1, 0.2, 0.6, 0.2)
-        self.assertAlmostEqual(axis_value(half_height, "ly"), 1.0)
+        # Radial clamp and deadzone behavior is unchanged.
+        clamped = engine.move(1, center_x + 5.0, center_y, 0.3)
+        self.assertAlmostEqual(abs(axis_value(clamped, "lx")), 1.0)
+        self.assertAlmostEqual(axis_value(clamped, "ly"), 0.0)
 
-        half_width = engine.move(1, 0.3, 0.4, 0.3)
-        self.assertAlmostEqual(axis_value(half_width, "lx"), 1.0)
+        deadzone = TouchEngine(
+            [dict(stick)], aspect_ratio=aspect, deadzone=0.1
+        )
+        deadzone.set_active(True)
+        deadzone.begin(2, center_x, center_y, 0.0)
+        tiny_x = 0.02 * radius_px / width
+        tiny = deadzone.move(2, center_x + tiny_x, center_y, 0.1)
+        self.assertAlmostEqual(axis_value(tiny, "lx"), 0.0)
+        self.assertAlmostEqual(axis_value(tiny, "ly"), 0.0)
 
     def test_pad_leaving_rect_suppresses_tap_even_when_clamped(self):
         engine = self.active_engine()

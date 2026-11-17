@@ -22,13 +22,20 @@ from py_modules.freedom_touch.runtime_policy import validate_settings  # noqa: E
 
 
 def custom_preset(
-    preset_id="custom-one", name="我的布局", layout_copy=None, scale=1.0
+    preset_id="custom-one",
+    name="我的布局",
+    layout_copy=None,
+    scale=1.0,
+    dpad_mode="four_way",
+    base_preset_id="tablet_standard",
 ):
     return {
         "id": preset_id,
         "name": name,
         "layout": copy.deepcopy(layout_copy or layout.default_layout()),
         "scale": scale,
+        "dpad_mode": dpad_mode,
+        "base_preset_id": base_preset_id,
     }
 
 
@@ -38,11 +45,17 @@ def test_catalog_has_three_ordered_builtin_presets():
     assert [preset["name"] for preset in presets] == list(BUILTIN_PRESET_NAMES)
     assert [preset["id"] for preset in presets] == [
         "tablet_standard",
-        "tablet_compact",
-        "tablet_trackpads",
+        "ps",
+        "switch",
     ]
     assert all(preset["builtin"] is True for preset in presets)
     assert all(len(preset["layout"]) == 19 for preset in presets)
+    assert all(preset["dpad_mode"] == "four_way" for preset in presets)
+    assert [preset["base_preset_id"] for preset in presets] == [
+        "tablet_standard",
+        "ps",
+        "switch",
+    ]
 
 
 def test_catalog_entries_are_fresh_independent_copies():
@@ -51,12 +64,12 @@ def test_catalog_entries_are_fresh_independent_copies():
     first[0]["name"] = "mutated"
 
     second = builtin_presets()
-    assert second[0]["layout"][0]["x"] == 0.035
-    assert second[0]["name"] == "平板标准"
+    assert second[0]["layout"][0]["x"] == pytest.approx(0.052)
+    assert second[0]["name"] == "平板默认（Xbox）"
 
     default = layout.default_layout()
     default[0]["x"] = 0.777
-    assert layout.default_layout()[0]["x"] == 0.035
+    assert layout.default_layout()[0]["x"] == pytest.approx(0.052)
 
 
 def test_preset_catalog_appends_custom_copies_and_find_returns_fresh_copy():
@@ -70,7 +83,7 @@ def test_preset_catalog_appends_custom_copies_and_find_returns_fresh_copy():
     found = find_preset("custom-one", [custom])
     assert found["name"] == "我的布局"
     found["layout"][0]["x"] = 0.5
-    assert custom["layout"][0]["x"] == 0.035
+    assert custom["layout"][0]["x"] == pytest.approx(0.052)
     assert find_preset("missing", [custom]) is None
 
 
@@ -96,7 +109,6 @@ def test_validate_v2_accepts_custom_presets_and_trims_names():
         custom_preset(preset_id=""),
         custom_preset(preset_id="   "),
         custom_preset(preset_id=5),
-        custom_preset(name="平板标准"),
         custom_preset(name=""),
         custom_preset(name="   "),
         custom_preset(name="x" * 49),
@@ -107,6 +119,41 @@ def test_validate_v2_rejects_invalid_custom_id_or_name(preset):
     raw = {"version": 2, "custom_presets": [preset]}
     with pytest.raises(ValueError):
         validate_settings(raw)
+
+
+@pytest.mark.parametrize("name", ["平板默认（Xbox）", "PS", "Switch"])
+def test_validate_v2_loads_custom_named_like_a_builtin(name):
+    # Before the built-in catalog changed, a user could legitimately save a
+    # custom preset named "PS" or "Switch"; those files must keep loading.
+    old = custom_preset(
+        preset_id="custom-old",
+        name=name,
+        scale=1.1,
+        dpad_mode="four_way",
+        base_preset_id="tablet_standard",
+    )
+    raw = {
+        "version": 2,
+        "active_preset_id": "custom-old",
+        "custom_presets": [old],
+        "layout": copy.deepcopy(layout.default_layout()),
+        "scale": 1.1,
+    }
+
+    first = validate_settings(raw)
+    second = validate_settings(copy.deepcopy(first))
+
+    assert second == first
+    assert first["active_preset_id"] == "custom-old"
+    presets = first["custom_presets"]
+    assert len(presets) == 1
+    preset = presets[0]
+    assert preset["id"] == "custom-old"
+    assert preset["name"] == name
+    assert preset["scale"] == 1.1
+    assert preset["layout"] == layout.default_layout()
+    assert preset["dpad_mode"] == "four_way"
+    assert preset["base_preset_id"] == "tablet_standard"
 
 
 def test_validate_v2_rejects_duplicate_custom_ids_and_names():
@@ -148,11 +195,46 @@ def test_validate_v2_active_custom_preset_must_exist():
         validate_settings(raw)
 
 
+def test_validate_v2_round_trips_old_custom_ps_and_switch_names():
+    # An old v2 document written before the catalog contained PS and Switch:
+    # such a custom preset has no dpad_mode/base_preset_id yet, but its name is
+    # not an error and must survive repeated validation byte-for-byte.
+    old_ps = {
+        "id": "custom-ps",
+        "name": "PS",
+        "layout": copy.deepcopy(layout.default_layout()),
+        "scale": 0.95,
+    }
+    old_switch = {
+        "id": "custom-switch",
+        "name": "Switch",
+        "layout": copy.deepcopy(layout.default_layout()),
+        "scale": 1.1,
+    }
+    raw = {
+        "version": 2,
+        "active_preset_id": "custom-ps",
+        "custom_presets": [old_ps, old_switch],
+        "layout": copy.deepcopy(layout.default_layout()),
+        "scale": 0.95,
+    }
+
+    first = validate_settings(raw)
+    second = validate_settings(copy.deepcopy(first))
+
+    assert second == first
+    names = {p["name"]: p for p in first["custom_presets"]}
+    assert set(names) == {"PS", "Switch"}
+    for preset in names.values():
+        assert preset["dpad_mode"] == "four_way"
+        assert preset["base_preset_id"] == "tablet_standard"
+    assert first["active_preset_id"] == "custom-ps"
+    assert first["scale"] == 0.95
+
+
 def test_active_builtin_layout_is_used_when_layout_is_absent():
-    settings = validate_settings(
-        {"version": 2, "active_preset_id": "tablet_compact"}
-    )
-    assert settings["layout"] == layout.validate_layout(
-        layout.tablet_compact_layout()
-    )
-    assert settings["scale"] == 0.95
+    settings = validate_settings({"version": 2, "active_preset_id": "ps"})
+    assert settings["active_preset_id"] == "ps"
+    assert settings["layout"] == layout.validate_layout(layout.ps_layout())
+    assert settings["scale"] == 1.0
+    assert settings["dpad_mode"] == "four_way"

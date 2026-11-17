@@ -187,7 +187,7 @@ class InputSinkTests(unittest.TestCase):
         )
         self.assertEqual(self.device.syns, 2)
 
-    def test_frame_writes_are_coalesced_and_one_syn(self):
+    def test_frame_analog_writes_are_coalesced_and_one_syn(self):
         self.sink.emit(
             [
                 ("button", "a", True),
@@ -196,6 +196,8 @@ class InputSinkTests(unittest.TestCase):
                 ("button", "a", True),
             ]
         )
+        # Analog sticks coalesce to the frame's final value; duplicate
+        # digital samples of the current state are not re-written.
         self.assertEqual(
             self.device.writes, [(1, 304, 1), (3, 0, 8192)]
         )
@@ -208,7 +210,16 @@ class InputSinkTests(unittest.TestCase):
         )
         self.assertEqual(self.device.syns, 1)
 
-    def test_frame_that_returns_to_original_writes_nothing(self):
+    def test_digital_reversal_inside_one_frame_keeps_both_edges(self):
+        self.sink.emit([("button", "a", True)])
+        self.sink.emit([("button", "a", False), ("button", "a", True)])
+        self.assertEqual(
+            self.device.writes,
+            [(1, 304, 1), (1, 304, 0), (1, 304, 1)],
+        )
+        self.assertEqual(self.device.syns, 3)
+
+    def test_frame_that_returns_analog_to_original_writes_nothing(self):
         self.sink.emit([("axis", "lx", 0.5), ("axis", "lx", 0.0)])
         self.assertEqual(self.device.writes, [])
         self.assertEqual(self.device.syns, 0)

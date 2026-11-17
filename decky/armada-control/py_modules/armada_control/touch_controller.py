@@ -39,6 +39,7 @@ if PLUGIN_ROOT not in sys.path:
 
 from py_modules.freedom_touch.presets import (  # noqa: E402
     BUILTIN_PRESET_IDS,
+    BUILTIN_PRESET_NAMES,
     DEFAULT_PRESET_ID,
     find_preset,
     preset_catalog,
@@ -60,6 +61,9 @@ OPTION_KEYS = frozenset(
         "edge_swipes",
         "haptics_enabled",
         "haptics_strength",
+        "dpad_mode",
+        "button_color",
+        "right_stick_fullscreen",
     }
 )
 
@@ -161,11 +165,20 @@ class TouchController:
             canonical = self._select_locked(preset_id)
             return await self._commit_locked(canonical, allow_restart=False)
 
-    async def save_preset(self, name, layout, scale, overwrite_id=None):
+    async def save_preset(
+        self,
+        name,
+        layout,
+        scale,
+        overwrite_id=None,
+        dpad_mode=None,
+        base_preset_id=None,
+    ):
         async with self._ensure_lock():
             current = copy.deepcopy(self._settings)
             custom = current["custom_presets"]
 
+            source = None
             if overwrite_id is not None:
                 if not isinstance(overwrite_id, str):
                     raise ValueError("overwrite_id must be a string")
@@ -175,6 +188,7 @@ class TouchController:
                 for position, preset in enumerate(custom):
                     if preset["id"] == overwrite_id:
                         index = position
+                        source = preset
                         break
                 if index is None:
                     raise ValueError("unknown preset to overwrite: %r" % (
@@ -187,11 +201,52 @@ class TouchController:
                     preset_id = str(uuid.uuid4())
                 index = None
 
+            if dpad_mode is None:
+                if source is not None:
+                    dpad_mode = source.get("dpad_mode")
+                if dpad_mode is None:
+                    dpad_mode = current.get("dpad_mode")
+            if base_preset_id is None:
+                if source is not None:
+                    base_preset_id = source.get("base_preset_id")
+                if base_preset_id is None:
+                    active = current.get("active_preset_id")
+                    if active in BUILTIN_PRESET_IDS:
+                        base_preset_id = active
+                    else:
+                        active_preset = find_preset(active, custom)
+                        base_preset_id = (
+                            active_preset.get("base_preset_id")
+                            if active_preset is not None
+                            else None
+                        )
+                if base_preset_id is None:
+                    base_preset_id = DEFAULT_PRESET_ID
+
+            # Loading existing data may still accept a custom name that now
+            # spells a built-in (see runtime_policy._custom_presets).  Saving,
+            # however, may not create or rename a preset to a built-in's name;
+            # overwriting an existing custom preset that already has that
+            # historical name stays allowed, so the user keeps their layout.
+            canonical_name = (
+                name.strip() if isinstance(name, str) else name
+            )
+            if canonical_name in BUILTIN_PRESET_NAMES:
+                previous_name = None
+                if index is not None and index < len(custom):
+                    previous_name = custom[index].get("name")
+                if previous_name != canonical_name:
+                    raise ValueError(
+                        "preset name conflicts with a built-in preset"
+                    )
+
             item = {
                 "id": preset_id,
                 "name": name,
                 "layout": layout,
                 "scale": scale,
+                "dpad_mode": dpad_mode,
+                "base_preset_id": base_preset_id,
             }
             if index is None:
                 custom.append(item)
@@ -201,6 +256,37 @@ class TouchController:
             current["active_preset_id"] = preset_id
             current["layout"] = copy.deepcopy(layout)
             current["scale"] = scale
+            current["dpad_mode"] = dpad_mode
+            canonical = validate_settings(current)
+            return await self._commit_locked(canonical, allow_restart=False)
+
+    async def delete_preset(self, preset_id):
+        async with self._ensure_lock():
+            if not isinstance(preset_id, str) or not preset_id:
+                raise ValueError("preset id must be a non-empty string")
+            if preset_id in BUILTIN_PRESET_IDS:
+                raise ValueError("built-in presets cannot be deleted")
+            current = copy.deepcopy(self._settings)
+            custom = current["custom_presets"]
+            index = None
+            for position, preset in enumerate(custom):
+                if preset["id"] == preset_id:
+                    index = position
+                    break
+            if index is None:
+                raise ValueError("unknown preset: %r" % (preset_id,))
+            was_active = current.get("active_preset_id") == preset_id
+            del custom[index]
+            if was_active:
+                template = find_preset(DEFAULT_PRESET_ID, custom)
+                if template is None:
+                    raise ValueError(
+                        "missing built-in preset: %r" % (DEFAULT_PRESET_ID,)
+                    )
+                current["active_preset_id"] = template["id"]
+                current["layout"] = copy.deepcopy(template["layout"])
+                current["scale"] = template["scale"]
+                current["dpad_mode"] = template.get("dpad_mode", "four_way")
             canonical = validate_settings(current)
             return await self._commit_locked(canonical, allow_restart=False)
 
@@ -1153,6 +1239,9 @@ class TouchController:
         current["layout"] = copy.deepcopy(preset["layout"])
         current["scale"] = preset["scale"]
         current["active_preset_id"] = preset["id"]
+        mode = preset.get("dpad_mode")
+        if mode is not None:
+            current["dpad_mode"] = mode
         return validate_settings(current)
 
     def _child_running(self):

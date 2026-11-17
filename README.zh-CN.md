@@ -17,7 +17,7 @@ Freedom Control 沿用 Armada Control 的插件架构与宿主服务接口，保
 - **分层配置**：支持共享、SoC 专用和用户配置三个层次。同一配置项可以面向所有设备定义一次，再按 SoC 细化，并由用户覆盖。
 - **初始支持 Lenovo Legion Tab Y700 Gen 5（TB323FU，SM8850）**：包含初始设备/SoC 配置，提供 CPU 频率上限和核心元数据。
 - **CPU governor 显示名称**：界面以可读名称显示所选 governor，而不只是内核标识符。
-- **触屏手柄单页**：只有一页，在内置触摸屏上绘制屏幕虚拟手柄，支持预设、布局编辑、显示隐藏与震动。
+- **触屏手柄单页**：内置触摸屏上的单页手柄，支持 Xbox/PS/Switch 预设、每个预设独立的四向/八向方向键、全局统一的白色/黑色按键颜色、删除自定义预设、删除并还原模板组件、四枚面键整体移动缩放、手柄导航、显示隐藏与震动。全屏布局编辑器支持左右切换工具面板；平板预设左右对称、摇杆保持圆形并等比缩放。可选的“全屏触控右摇杆”默认关闭，开启后隐藏固定右摇杆，在空白区域滑动即可控制右摇杆，停止或松手后回中。
 - **TF 卡游戏库标签页**：把已分配 TF 卡的 Linux 保留分区转换为 Steam 游戏库，同时保留该卡的 Android 存储。
 
 SM8850 目前处于基础集成阶段，性能调优仍在进行。
@@ -120,6 +120,6 @@ Freedom Control 源自 Armada 项目的 Armada Control。原始插件、宿主�
 
 TF 卡游戏库页面移植自 [Armada Installer](https://github.com/mydanyi/armada-installer)（`1ac40b959085e6b55c2aef1467080b07560a2431`），保留原作者与来源。其系统安装页面、语言选择与作者面板未迁移；移植后的 TF 代码经原作者同意，作为本项目的一部分依据 GNU 通用公共许可证第 2 版分发。
 
-触摸控制器移植自 [decky-freedom-touch-controller](https://github.com/mydanyi/decky-freedom-touch-controller)（`9357d975711d17d3ee70fc97090b01ed47365672`），原作者为单翼（danyi），保留原作者、来源与第三方权利。经作者许可，移植后的触屏代码继续依据 GNU 通用公共许可证第 2 版分发。第三方声明见 [decky/armada-control/TOUCH_THIRD_PARTY_NOTICES.md](decky/armada-control/TOUCH_THIRD_PARTY_NOTICES.md)。
+触摸控制器移植自 [decky-freedom-touch-controller](https://github.com/mydanyi/decky-freedom-touch-controller)（`9357d975711d17d3ee70fc97090b01ed47365672`），原作者为单翼（danyi），并同时整合了作者保留的 0.1.6 修订，保留原作者、来源与第三方权利。经作者许可，移植后的触屏代码继续依据 GNU 通用公共许可证第 2 版分发。第三方声明见 [decky/armada-control/TOUCH_THIRD_PARTY_NOTICES.md](decky/armada-control/TOUCH_THIRD_PARTY_NOTICES.md)。
 
 本项目依据 GNU 通用公共许可证第 2 版分发。参见 [LICENSE](LICENSE)。

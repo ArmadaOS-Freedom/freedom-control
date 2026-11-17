@@ -115,58 +115,65 @@ class DefaultLayoutTests(unittest.TestCase):
     def test_tablet_standard_matches_the_requested_geometry(self):
         controls = {c["id"]: c for c in layout.default_layout()}
         expected = {
-            "stick_l": (0.035, 0.58, 0.17, 0.30),
-            "dpad_l": (0.04, 0.24, 0.14, 0.23),
-            "stick_r": (0.79, 0.24, 0.17, 0.28),
-            "btn_y": (0.855, 0.59, 0.065, 0.10),
-            "btn_x": (0.785, 0.70, 0.065, 0.10),
-            "btn_b": (0.925, 0.70, 0.065, 0.10),
-            "btn_a": (0.855, 0.81, 0.065, 0.10),
-            "pad_l": (0.28, 0.61, 0.19, 0.30),
-            "pad_r": (0.53, 0.61, 0.19, 0.30),
-            "btn_lb": (0.02, 0.02, 0.10, 0.075),
-            "btn_lt": (0.13, 0.02, 0.10, 0.075),
-            "btn_rt": (0.77, 0.02, 0.10, 0.075),
-            "btn_rb": (0.88, 0.02, 0.10, 0.075),
-            "btn_guide": (0.24, 0.02, 0.10, 0.075),
-            "btn_qam": (0.66, 0.02, 0.10, 0.075),
-            "btn_back": (0.44, 0.04, 0.05, 0.07),
-            "btn_start": (0.51, 0.04, 0.05, 0.07),
+            "stick_l": (0.052, 0.682, 0.136, 0.216),
+            "stick_r": (0.812, 0.682, 0.136, 0.216),
+            "dpad_l": (0.038, 0.406, 0.164, 0.248),
+            "btn_y": (0.854, 0.406, 0.052, 0.08),
+            "btn_x": (0.798, 0.490, 0.052, 0.08),
+            "btn_b": (0.910, 0.490, 0.052, 0.08),
+            "btn_a": (0.854, 0.574, 0.052, 0.08),
+            "pad_l": (0.299, 0.670, 0.152, 0.24),
+            "pad_r": (0.549, 0.670, 0.152, 0.24),
+            "btn_lb": (0.03, 0.29, 0.08, 0.06),
+            "btn_lt": (0.14, 0.29, 0.08, 0.06),
+            "btn_rt": (0.78, 0.29, 0.08, 0.06),
+            "btn_rb": (0.89, 0.29, 0.08, 0.06),
+            "btn_guide": (0.010, 0.0275, 0.072, 0.060),
+            "btn_qam": (0.918, 0.0275, 0.072, 0.060),
+            "btn_back": (0.404, 0.0275, 0.072, 0.060),
+            "btn_start": (0.524, 0.0275, 0.072, 0.060),
+            "btn_l3": (0.092, 0.936, 0.056, 0.048),
+            "btn_r3": (0.852, 0.936, 0.056, 0.048),
         }
         for control_id, rect in expected.items():
             with self.subTest(control=control_id):
                 actual = controls[control_id]
-                self.assertEqual(
-                    (actual["x"], actual["y"], actual["w"], actual["h"]),
-                    rect,
-                )
+                for field, value in zip(("x", "y", "w", "h"), rect):
+                    self.assertAlmostEqual(actual[field], value)
 
-    def test_sidebars_sit_immediately_beside_their_shoulders(self):
+    def test_system_keys_use_top_corners_and_upper_center(self):
         controls = {c["id"]: c for c in layout.default_layout()}
         guide = controls["btn_guide"]
         qam = controls["btn_qam"]
-        lb = controls["btn_lb"]
-        lt = controls["btn_lt"]
-        rt = controls["btn_rt"]
-        rb = controls["btn_rb"]
+        back = controls["btn_back"]
+        start = controls["btn_start"]
 
-        # Left-to-right: LB, LT, 左侧栏, centre pair, 右侧栏, RT, RB.
-        left_gap = guide["x"] - (lt["x"] + lt["w"])
-        right_gap = rt["x"] - (qam["x"] + qam["w"])
-        self.assertAlmostEqual(left_gap, 0.01)
-        self.assertAlmostEqual(right_gap, 0.01)
-        self.assertAlmostEqual(left_gap, right_gap)
-        self.assertLess(lb["x"] + lb["w"], lt["x"])
-        self.assertLess(lt["x"] + lt["w"], guide["x"])
-        self.assertLess(qam["x"] + qam["w"], rt["x"])
-        self.assertLess(rt["x"] + rt["w"], rb["x"])
-        self.assertEqual(guide["y"], lb["y"])
-        self.assertEqual(guide["y"], lt["y"])
-        self.assertEqual(qam["y"], rt["y"])
-        self.assertEqual(qam["y"], rb["y"])
-        self.assertLess(guide["x"], qam["x"])
+        # Correct utility labels (guide/qam corner menus, back/start middle).
         self.assertEqual(guide["label"], "左侧栏")
         self.assertEqual(qam["label"], "右侧栏")
+        self.assertEqual(back["label"], "返回")
+        self.assertEqual(start["label"], "开始")
+
+        # All four share the same top centre line cy=.0575, mirroring about
+        # x=.5 (guide<->qam, back<->start).
+        for c in (guide, qam, back, start):
+            self.assertAlmostEqual(c["y"] + c["h"] / 2.0, 0.0575)
+        for left, right in ((guide, qam), (back, start)):
+            self.assertAlmostEqual(
+                left["x"], 1.0 - (right["x"] + right["w"])
+            )
+
+        # All utility keys stay within the top extent.
+        for c in (guide, qam, back, start):
+            self.assertLessEqual(c["y"] + c["h"], 0.1)
+
+        # Guide/QAM occupy opposite extreme top corners.
+        self.assertLess(guide["x"] + guide["w"], 0.1)
+        self.assertGreater(qam["x"], 0.9)
+
+        # Back/Start sit at the upper middle with centres .44/.56.
+        self.assertAlmostEqual(back["x"] + back["w"] / 2.0, 0.44)
+        self.assertAlmostEqual(start["x"] + start["w"] / 2.0, 0.56)
 
     def test_catalog_layouts_keep_nineteen_controls_without_overlap(self):
         catalogs = {
@@ -273,7 +280,7 @@ class EffectiveLayoutHitTests(unittest.TestCase):
                 )
                 engine.end(pointer, 0.1)
 
-    def test_l3_and_r3_sit_below_their_control_clusters(self):
+    def test_l3_and_r3_sit_below_their_own_sticks(self):
         controls = {c["id"]: c for c in layout.default_layout()}
         self.assertGreaterEqual(
             controls["btn_l3"]["y"],
@@ -281,7 +288,7 @@ class EffectiveLayoutHitTests(unittest.TestCase):
         )
         self.assertGreaterEqual(
             controls["btn_r3"]["y"],
-            controls["pad_r"]["y"] + controls["pad_r"]["h"],
+            controls["stick_r"]["y"] + controls["stick_r"]["h"],
         )
 
     def test_effective_layout_at_base_scale_preserves_bounded_defaults(self):

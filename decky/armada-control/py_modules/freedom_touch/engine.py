@@ -10,6 +10,19 @@ EDGE_ZONE = 0.07
 EDGE_MIN_TRAVEL = 0.08
 EDGE_HORIZONTAL_FACTOR = 2.0
 _EPSILON = 1e-9
+DPAD_MODES = ("four_way", "eight_way")
+DEFAULT_DPAD_MODE = "four_way"
+_DPAD_SECTORS = {
+    0: (1, 0),
+    1: (1, 1),
+    2: (0, 1),
+    3: (-1, 1),
+    4: (-1, 0),
+    -1: (1, -1),
+    -2: (0, -1),
+    -3: (-1, -1),
+    -4: (-1, 0),
+}
 
 
 def _clamp01(value):
@@ -29,6 +42,8 @@ class TouchEngine:
         deadzone=0.1,
         edge_swipes=False,
         aspect_ratio=1.0,
+        dpad_mode=DEFAULT_DPAD_MODE,
+        right_stick_fullscreen=False,
     ):
         self.controls = _layout.validate_layout(layout)
         try:
@@ -37,10 +52,19 @@ class TouchEngine:
             raise ValueError("deadzone must be numeric") from exc
         if not math.isfinite(deadzone) or deadzone < 0.0 or deadzone >= 1.0:
             raise ValueError("deadzone must be in [0, 1)")
+        if not isinstance(dpad_mode, str) or dpad_mode not in DPAD_MODES:
+            raise ValueError(
+                "dpad_mode must be one of: %s" % (", ".join(DPAD_MODES),)
+            )
+        if not isinstance(right_stick_fullscreen, bool):
+            raise ValueError("right_stick_fullscreen must be a boolean")
 
         self.deadzone = deadzone
         self.edge_swipes = bool(edge_swipes)
         self.aspect_ratio = self._valid_aspect(aspect_ratio)
+        self.dpad_mode = dpad_mode
+        self.right_stick_fullscreen = right_stick_fullscreen
+        self._look_owner = None
         self.active = False
         self._pointers = {}
         self._owners = {}
@@ -83,6 +107,23 @@ class TouchEngine:
                         "fired": False,
                         "rejected": False,
                     }
+                    return events
+            if self.right_stick_fullscreen and self._look_owner is None:
+                try:
+                    now = float(now)
+                except (TypeError, ValueError):
+                    return events
+                if not math.isfinite(now):
+                    return events
+                self._look_owner = {
+                    "pointer_id": pointer_id,
+                    "x": x,
+                    "y": y,
+                    "time": now,
+                    "last_motion": now,
+                    "moving": False,
+                }
+                self._pointers[pointer_id] = {"kind": "look"}
             return events
 
         kind = control["kind"]
@@ -126,6 +167,7 @@ class TouchEngine:
             events.extend((("axis", first, ax), ("axis", second, ay)))
         elif kind == "dpad":
             dx, dy = self._dpad_axes(control, x, y)
+            record["dpad"] = (dx, dy)
             events.extend((("axis", "dx", dx), ("axis", "dy", dy)))
         else:
             events.append(
@@ -145,6 +187,37 @@ class TouchEngine:
             # Hit testing happens only on begin; moving off a button does not
             # release it.
             return []
+        if kind == "look":
+            owner = self._look_owner
+            if owner is None or owner["pointer_id"] != pointer_id:
+                return []
+            try:
+                x = float(x)
+                y = float(y)
+                now = float(now)
+            except (TypeError, ValueError):
+                return []
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(now)):
+                return []
+            if now < owner["time"]:
+                return []
+            dt = max(now - owner["time"], 1.0 / 120.0)
+            nx = (x - owner["x"]) / dt / 2.0
+            ny = (y - owner["y"]) / self.aspect_ratio / dt / 2.0
+            mag = math.hypot(nx, ny)
+            if mag <= self.deadzone:
+                rx = 0.0
+                ry = 0.0
+            else:
+                scale = min(1.0, (mag - self.deadzone) / (1.0 - self.deadzone))
+                rx = nx / mag * scale
+                ry = ny / mag * scale
+            owner["x"] = x
+            owner["y"] = y
+            owner["time"] = now
+            owner["last_motion"] = now
+            owner["moving"] = (rx != 0.0 or ry != 0.0)
+            return [("axis", "rx", rx), ("axis", "ry", ry)]
         if kind == "edge":
             # Menu gestures are recognized from movement only; a begin inside
             # an otherwise empty edge zone never emits anything by itself.
@@ -177,6 +250,7 @@ class TouchEngine:
 
         if kind == "dpad":
             dx, dy = self._dpad_axes(control, x, y)
+            record["dpad"] = (dx, dy)
             return [("axis", "dx", dx), ("axis", "dy", dy)]
 
         raw = self._local_raw(control, x, y)
@@ -189,6 +263,27 @@ class TouchEngine:
         distance = math.hypot(raw[0] - start[0], raw[1] - start[1])
         record["max_move"] = max(record["max_move"], distance)
         return [("pad", control["output"], self._pad_payload(raw, True))]
+
+    def tick(self, now):
+        if not self.active or not self.right_stick_fullscreen:
+            return []
+        try:
+            now = float(now)
+        except (TypeError, ValueError):
+            return []
+        if math.isnan(now) or math.isinf(now):
+            return []
+        owner = self._look_owner
+        if owner is not None and owner.get('moving'):
+            last = owner.get('last_motion')
+            try:
+                last = float(last)
+            except (TypeError, ValueError):
+                return []
+            if now - last >= 0.05:
+                owner['moving'] = False
+                return [('axis', 'rx', 0.0), ('axis', 'ry', 0.0)]
+        return []
 
     def end(self, pointer_id, now):
         if not self.active:
@@ -209,6 +304,9 @@ class TouchEngine:
             events.append(("button", output, False))
         self._refs.clear()
         self._owners.clear()
+        if self._look_owner is not None:
+            self._look_owner = None
+            events.extend((("axis", "rx", 0.0), ("axis", "ry", 0.0)))
         return events
 
     def set_active(self, active):
@@ -247,10 +345,15 @@ class TouchEngine:
                 pointer_id = self._owners.get(control_id)
                 if pointer_id is not None:
                     pressed = True
-                    if kind in ("stick", "pad"):
-                        record = self._pointers.get(pointer_id)
-                        if record is not None:
-                            x, y = record["local"]
+                    record = self._pointers.get(pointer_id)
+                    if record is not None and kind in ("stick", "pad"):
+                        x, y = record["local"]
+                    elif record is not None and kind == "dpad":
+                        # Highlight the direction actually emitted, so the
+                        # renderer never guesses from the finger position.
+                        dx, dy = record.get("dpad", (0, 0))
+                        x = 0.5 + 0.5 * dx
+                        y = 0.5 + 0.5 * dy
 
             controls[control_id] = {
                 "pressed": bool(pressed),
@@ -267,6 +370,13 @@ class TouchEngine:
             return []
 
         kind = record["kind"]
+        if kind == "look":
+            owner = self._look_owner
+            if owner is not None and owner["pointer_id"] == pointer_id:
+                self._look_owner = None
+                self._pointers.pop(pointer_id, None)
+                return [("axis", "rx", 0.0), ("axis", "ry", 0.0)]
+            return []
         if kind == "edge":
             # A menu gesture owns no control and therefore produces no pad
             # tap, release event, or neutralisation work.
@@ -369,20 +479,34 @@ class TouchEngine:
             record["rejected"] = True
         return []
 
+    def _project(self, control):
+        if control.get("kind") != "stick":
+            return control
+        return _layout.circular_stick_rect(control, self.aspect_ratio)
+
     def _hit(self, x, y):
         # draw_controls paints every pad first and every other control after
         # it, each group in layout order.  Hit testing walks that stacking
         # order backwards, so a button drawn above a pad wins no matter where
         # either sits in the layout list.
+        # Sticks are hit-tested against the same circular projection that is
+        # drawn, but acceptance stays within the projected bounding rectangle.
         ordered = [c for c in self.controls if c["kind"] == "pad"]
         ordered.extend(c for c in self.controls if c["kind"] != "pad")
 
         for control in reversed(ordered):
             if (
-                control["x"] <= x <= control["x"] + control["w"]
-                and control["y"] <= y <= control["y"] + control["h"]
+                self.right_stick_fullscreen
+                and control["kind"] == "stick"
+                and control["output"] == "right"
             ):
-                return control
+                continue
+            projected = self._project(control)
+            if (
+                projected["x"] <= x <= projected["x"] + projected["w"]
+                and projected["y"] <= y <= projected["y"] + projected["h"]
+            ):
+                return projected
         return None
 
     @staticmethod
@@ -414,7 +538,9 @@ class TouchEngine:
 
     def _stick_axes(self, control, x, y):
         # Normalize each axis by its own half-extent, then apply a radial
-        # deadzone/clamp so diagonal magnitude stays bounded.
+        # deadzone/clamp so diagonal magnitude stays bounded.  Projection is
+        # idempotent so a control previously projected by _hit is unchanged.
+        control = self._project(control)
         nx = (x - (control["x"] + control["w"] / 2.0)) / (control["w"] / 2.0)
         ny = (y - (control["y"] + control["h"] / 2.0)) / (control["h"] / 2.0)
         magnitude = math.hypot(nx, ny)
@@ -429,9 +555,21 @@ class TouchEngine:
         nx = (x - (control["x"] + control["w"] / 2.0)) / (control["w"] / 2.0)
         ny = (y - (control["y"] + control["h"] / 2.0)) / (control["h"] / 2.0)
         threshold = max(self.deadzone, 0.05)
-        dx = 1 if nx >= threshold else (-1 if nx <= -threshold else 0)
-        dy = 1 if ny >= threshold else (-1 if ny <= -threshold else 0)
-        return dx, dy
+        if math.hypot(nx, ny) <= threshold:
+            return 0, 0
+
+        if self.dpad_mode == "eight_way":
+            # The eight sectors are centred on the cardinals and diagonals
+            # (22.5 degrees half-width), so the radius never changes the mode.
+            angle = math.atan2(ny, nx)
+            sector = math.floor(angle / (math.pi / 4.0) + 0.5)
+            return _DPAD_SECTORS[sector]
+
+        # Four-way: the dominant normalized axis wins, with a tie going
+        # vertical so a 45-degree corner still reports exactly one axis.
+        if abs(ny) + _EPSILON >= abs(nx):
+            return 0, 1 if ny > 0.0 else -1
+        return (1 if nx > 0.0 else -1), 0
 
     @staticmethod
     def _pad_payload(local, touching):

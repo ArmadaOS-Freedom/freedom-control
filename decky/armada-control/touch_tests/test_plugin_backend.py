@@ -242,6 +242,8 @@ def test_save_preset_returns_fresh_state_and_reload_preserves_it(
                 {"layout": layout}
             )["layout"],
             "scale": 1.0,
+            "dpad_mode": "four_way",
+            "base_preset_id": "tablet_standard",
         }
     ]
     assert reloaded["settings"] == saved["settings"]
@@ -264,10 +266,11 @@ def test_save_preset_state_and_catalog_are_independent_copies(plugin):
         saved["settings"]["custom_presets"][0]["layout"][0]["x"] = 0.7
         return await plugin.get_state()
 
+    expected_x = default_layout()[0]["x"]
     state = asyncio.run(scenario())
-    assert state["settings"]["layout"][0]["x"] == 0.035
-    assert state["presets"][-1]["layout"][0]["x"] == 0.035
-    assert state["settings"]["custom_presets"][0]["layout"][0]["x"] == 0.035
+    assert state["settings"]["layout"][0]["x"] == expected_x
+    assert state["presets"][-1]["layout"][0]["x"] == expected_x
+    assert state["settings"]["custom_presets"][0]["layout"][0]["x"] == expected_x
 
 
 def test_select_preset_copies_layout_and_scale_but_preserves_options(plugin):
@@ -282,17 +285,18 @@ def test_select_preset_copies_layout_and_scale_but_preserves_options(plugin):
     async def scenario():
         await _start(plugin, edge_swipes=True)
         await plugin.set_settings(base)
-        return await plugin.select_preset("tablet_compact")
+        return await plugin.select_preset("ps")
 
     state = asyncio.run(scenario())
     assert state["settings"]["enabled"] is True
     assert state["settings"]["opacity"] == 0.75
     assert state["settings"]["deadzone"] == 0.3
     assert state["settings"]["edge_swipes"] is True
-    assert state["settings"]["scale"] == 0.95
-    assert state["settings"]["active_preset_id"] == "tablet_compact"
+    assert state["settings"]["scale"] == 1.0
+    assert state["settings"]["dpad_mode"] == "four_way"
+    assert state["settings"]["active_preset_id"] == "ps"
     assert state["settings"]["layout"] == controller_module.validate_settings(
-        {"active_preset_id": "tablet_compact"}
+        {"active_preset_id": "ps"}
     )["layout"]
 
 
@@ -386,7 +390,11 @@ def test_builtin_presets_are_read_only(plugin):
                 "覆盖标准", layout, 1.0, overwrite_id="tablet_standard"
             )
         with pytest.raises(ValueError):
-            await plugin.save_preset("平板标准", layout, 1.0)
+            await plugin.save_preset("平板默认（Xbox）", layout, 1.0)
+        with pytest.raises(ValueError):
+            await plugin.save_preset("PS", layout, 1.0)
+        with pytest.raises(ValueError):
+            await plugin.save_preset("Switch", layout, 1.0)
         with pytest.raises(ValueError):
             await plugin.save_preset(
                 "自定义", layout, 1.0, overwrite_id="not-a-preset"
@@ -548,11 +556,74 @@ def test_update_options_rejects_non_option_fields(plugin):
         with pytest.raises(ValueError):
             await plugin.update_options({"layout": default_layout()})
         with pytest.raises(ValueError):
-            await plugin.update_options({"active_preset_id": "tablet_compact"})
+            await plugin.update_options({"active_preset_id": "ps"})
         with pytest.raises(ValueError):
             await plugin.update_options("not-a-dict")
 
     asyncio.run(scenario())
+
+
+def test_save_preset_rejects_new_custom_named_after_builtin(plugin):
+    layout = default_layout()
+
+    async def scenario():
+        await _start(plugin)
+        for name in ("平板默认（Xbox）", "PS", "Switch"):
+            with pytest.raises(ValueError):
+                await plugin.save_preset(name, layout, 1.0)
+
+    asyncio.run(scenario())
+
+
+def test_overwriting_legacy_custom_named_after_builtin_is_allowed(
+    plugin, tmp_path
+):
+    # A user who saved a custom preset called "PS" before the built-in catalog
+    # existed must be able to overwrite it (change its geometry/scale) even
+    # though new presets with that name are rejected.
+    settings_dir = tmp_path / "settings"
+    settings_dir.mkdir()
+    old_layout = list(reversed(default_layout()))
+    raw = {
+        "version": 2,
+        "active_preset_id": "legacy-ps",
+        "custom_presets": [
+            {
+                "id": "legacy-ps",
+                "name": "PS",
+                "layout": old_layout,
+                "scale": 0.95,
+            }
+        ],
+        "layout": old_layout,
+        "scale": 0.95,
+    }
+    (settings_dir / "touch-controller.json").write_text(
+        json.dumps(raw), encoding="utf-8"
+    )
+
+    new_layout = default_layout()
+
+    async def scenario():
+        await _start(plugin)
+        saved = await plugin.save_preset(
+            "PS", new_layout, 1.05, overwrite_id="legacy-ps"
+        )
+        reloaded = _new_plugin()
+        await _start(reloaded)
+        return saved, await reloaded.get_state()
+
+    saved, reloaded = asyncio.run(scenario())
+
+    assert len(saved["settings"]["custom_presets"]) == 1
+    preset = saved["settings"]["custom_presets"][0]
+    assert preset["id"] == "legacy-ps"
+    assert preset["name"] == "PS"
+    assert preset["scale"] == 1.05
+    assert preset["dpad_mode"] == "four_way"
+    assert preset["base_preset_id"] == "tablet_standard"
+    assert saved["settings"]["active_preset_id"] == "legacy-ps"
+    assert reloaded["settings"] == saved["settings"]
 
 
 def test_persist_failure_leaves_last_state_unchanged(plugin, tmp_path, monkeypatch):

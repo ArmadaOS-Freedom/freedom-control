@@ -155,10 +155,13 @@ class ValidateSettingsTests(unittest.TestCase):
                 "edge_swipes",
                 "haptics_enabled",
                 "haptics_strength",
+                "dpad_mode",
+                "button_color",
                 "layout",
                 "active_preset_id",
                 "custom_presets",
                 "version",
+                "right_stick_fullscreen",
             },
         )
         self.assertIs(settings["enabled"], False)
@@ -168,9 +171,12 @@ class ValidateSettingsTests(unittest.TestCase):
         self.assertIs(settings["edge_swipes"], False)
         self.assertIs(settings["haptics_enabled"], True)
         self.assertEqual(settings["haptics_strength"], 25)
+        self.assertEqual(settings["dpad_mode"], "four_way")
+        self.assertEqual(settings["button_color"], "white")
         self.assertEqual(settings["version"], 2)
         self.assertEqual(settings["active_preset_id"], "tablet_standard")
         self.assertEqual(settings["custom_presets"], [])
+        self.assertIs(settings["right_stick_fullscreen"], False)
         self.assertEqual(settings["layout"], validate_layout(default_layout()))
 
     def test_explicit_valid_settings_are_canonicalized(self):
