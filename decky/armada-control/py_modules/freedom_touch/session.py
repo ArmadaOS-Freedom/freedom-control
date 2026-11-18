@@ -393,7 +393,9 @@ def _read_cardinal(x11, connection, root, atom):
             or not data
         ):
             return None
-        return int(ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))[0])
+        # Xlib hands format-32 data back as C long, sign-extended on LP64;
+        # non-Steam shortcut app ids have bit 31 set, so keep the low 32 bits.
+        return int(ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))[0]) & 0xFFFFFFFF
     finally:
         if data:
             x11.XFree(ctypes.cast(data, ctypes.c_void_p))
