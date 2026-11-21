@@ -1,5 +1,5 @@
 import { call } from "@decky/api";
-import type { CompatAppliedState, Config, CurvesState, DisplayOrientation, DisplayOrientationState, FanCurve, FanSettings, HomePowerState, InstalledGame, PowerConfig, RgbConfig, Tweaks } from "./types";
+import type { CompatAppliedState, Config, CurvesState, DisplayOrientationSetting, DisplayOrientationState, FanCurve, FanSettings, HomePowerState, InstalledGame, PowerConfig, RgbConfig, Tweaks } from "./types";
 
 export const getConfig = () => call<[], Config>("get_config");
 export const getInstalledGames = () => call<[], InstalledGame[]>("get_installed_games");
@@ -60,5 +60,5 @@ export const syncHomePower = () => call<[], HomePowerState>("sync_home_power");
 export const restoreHomePower = () => call<[], HomePowerState>("restore_home_power");
 export const getDisplayOrientation = () => call<[], DisplayOrientationState>("get_display_orientation");
 // Empty string turns the override off; the backend rejects anything else.
-export const setDisplayOrientation = (orientation: DisplayOrientation | "") =>
+export const setDisplayOrientation = (orientation: DisplayOrientationSetting | "") =>
   call<[string], DisplayOrientationState>("set_display_orientation", orientation);
