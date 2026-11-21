@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { getDisplayOrientation, restartGameMode, setDisplayOrientation } from "../backend";
 import { t } from "../i18n";
 import type { TranslationKey } from "../i18n";
-import type { DisplayOrientation, DisplayOrientationState } from "../types";
+import type { DisplayOrientation, DisplayOrientationSetting, DisplayOrientationState } from "../types";
 import { SelectEdit, ToggleRow } from "./widgets";
+import { appliesLive, orientationChoices } from "../lib/displayOrientationChoices";
 
 // Panel axes in presentation order; "normal" is the panel's own orientation.
 const ORIENTATION_LABELS: Record<DisplayOrientation, TranslationKey> = {
@@ -15,7 +16,9 @@ const ORIENTATION_LABELS: Record<DisplayOrientation, TranslationKey> = {
   upsidedown: "settings.gameModeOrientationUpsidedown",
 };
 
-const ORIENTATIONS = Object.keys(ORIENTATION_LABELS) as DisplayOrientation[];
+
+const choiceLabel = (value: DisplayOrientationSetting): TranslationKey =>
+  value === "auto" ? "settings.gameModeOrientationAuto" : ORIENTATION_LABELS[value];
 
 function ConfirmOrientationApplyModal({ closeModal, onApply }: { closeModal?: () => void; onApply: () => void }) {
   const apply = () => {
@@ -56,7 +59,7 @@ export function GameModeOrientationSetting() {
     return () => { cancelled = true; };
   }, []);
 
-  const apply = async (orientation: DisplayOrientation | "") => {
+  const apply = async (orientation: DisplayOrientationSetting | "") => {
     if (busy.current || restartBusy.current || !state) return;
     busy.current = true;
     setSaving(true);
@@ -64,11 +67,14 @@ export function GameModeOrientationSetting() {
     try {
       const next = await setDisplayOrientation(orientation);
       setState(next);
-      // The value is stored for the next Game Mode session, never applied live.
+      // Fixed values are stored for the next Game Mode session; "auto" and
+      // leaving it are applied by the rotation service right away.
       if (next.orientation !== previous) {
         toaster.toast({
           title: t("settings.gameModeOrientation"),
-          body: t("settings.gameModeOrientationRestart"),
+          body: t(appliesLive(previous, next.orientation)
+            ? "settings.gameModeOrientationAutoApplied"
+            : "settings.gameModeOrientationRestart"),
         });
       }
     } catch (error) {
@@ -132,9 +138,9 @@ export function GameModeOrientationSetting() {
         <SelectEdit
           label={t("settings.gameModeOrientationDirection")}
           value={orientation}
-          options={ORIENTATIONS.map((value) => ({ data: value, label: t(ORIENTATION_LABELS[value]) }))}
+          options={orientationChoices(state).map((value) => ({ data: value, label: t(choiceLabel(value)) }))}
           disabled={controlsDisabled || !state.supported}
-          onChange={(value: DisplayOrientation) => { if (value !== orientation) void apply(value); }}
+          onChange={(value: DisplayOrientationSetting) => { if (value !== orientation) void apply(value); }}
         />
       )}
       {state && (
