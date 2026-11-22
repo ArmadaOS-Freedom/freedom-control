@@ -164,6 +164,7 @@ export interface Config {
   mtpEnabled: boolean;
   usbNetworkEnabled: boolean;
   usbNetworkSupported: boolean;
+  usbNetworkPaused?: boolean;
   desktopMode: string;
   desktopModes: DropdownChoice[];
   sleepMode: string;

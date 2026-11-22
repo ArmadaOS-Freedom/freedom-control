@@ -123,7 +123,10 @@ def usb_network_state():
         if str(exc) != "unknown action":
             raise
         return {"enabled": False, "supported": False}
-    return {"enabled": bool(state.get("enabled")), "supported": bool(state.get("supported"))}
+    result = {"enabled": bool(state.get("enabled")), "supported": bool(state.get("supported"))}
+    if "paused" in state:
+        result["paused"] = bool(state["paused"])
+    return result
 
 
 def os_version():

@@ -59,6 +59,8 @@ export const zhCN = {
   "settings.usbNetwork": "启用 USB SSH",
   "settings.usbNetworkDescription": "通过 USB 线连接至 172.16.42.1",
   "settings.usbSettingsError": "USB 设置未能应用",
+  "settings.usbSettingsRefreshError": "无法刷新 USB 状态",
+  "settings.retryUsbSettings": "重试刷新 USB 状态",
   "settings.osVersion": "系统版本",
   "common.unknown": "未知",
   "settings.experimental": "实验性功能",

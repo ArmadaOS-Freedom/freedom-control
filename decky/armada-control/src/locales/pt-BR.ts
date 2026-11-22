@@ -59,6 +59,8 @@ export const ptBR = {
   "settings.usbNetwork": "Habilitar SSH por USB",
   "settings.usbNetworkDescription": "Conecte usando um cabo USB a 172.16.42.1",
   "settings.usbSettingsError": "Não foi possível aplicar as configurações de USB",
+  "settings.usbSettingsRefreshError": "Não foi possível atualizar o status do USB",
+  "settings.retryUsbSettings": "Tentar atualizar o status do USB novamente",
   "settings.osVersion": "Versão do SO",
   "common.unknown": "desconhecido",
   "settings.experimental": "Experimental",
