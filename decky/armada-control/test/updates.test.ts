@@ -95,7 +95,8 @@ assert mode == 0o755, oct(mode)
 test("tar extraction rejects files at the extraction root", () => {
   const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
   try {
-    const result = spawnSync("python", ["-c", python + `
+    const executable = process.platform === "win32" ? "python" : "python3";
+    const result = spawnSync(executable, ["-c", python + `
 import io, tarfile
 archive, destination = sys.argv[2:]
 with tarfile.open(archive, "w") as bundle:
@@ -137,6 +138,7 @@ import pathlib, sys, tempfile
 module.HOME = pathlib.Path(sys.argv[2])
 module.TURNIP_DIR = module.HOME / "turnip"
 module.SYSTEM_TURNIP_DIR = module.HOME / "system-turnip"
+module.HOME.mkdir(parents=True)
 module.TURNIP_DIR.mkdir(parents=True)
 driver = module.TURNIP_DIR / "custom-driver"
 driver.mkdir()
