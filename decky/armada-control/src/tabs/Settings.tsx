@@ -20,7 +20,7 @@ import {
 } from "../backend";
 import { GameModeOrientationSetting } from "../components/GameModeOrientationSetting";
 import { HomePowerSetting } from "../components/HomePowerSetting";
-import { SelectEdit, SliderEdit, ToggleRow } from "../components/widgets";
+import { ButtonRow, SelectEdit, SliderEdit, ToggleRow } from "../components/widgets";
 import { useDebouncedApply } from "../hooks/useDebouncedApply";
 import { t, translateLabel } from "../i18n";
 import { percentToPwm, pwmToPercent } from "../lib/fanCurve";
@@ -50,6 +50,7 @@ export function Settings({ config, setConfig }: {
   const [lowPowerDownloadsBatterySaving, setLowPowerDownloadsBatterySaving] = useState(false);
   const usbSettingsBusy = useRef(false);
   const [usbSettingsSaving, setUsbSettingsSaving] = useState(false);
+  const [usbSettingsRefreshFailed, setUsbSettingsRefreshFailed] = useState(false);
   const setBottomScreenBrightness = useDebouncedApply(
     async () => (await getConfig()).bottomScreenBrightness,
     (value) => setConfig((current) => (current ? { ...current, bottomScreenBrightness: value } : current)),
@@ -116,7 +117,7 @@ export function Settings({ config, setConfig }: {
       setConfig((current) => (current ? { ...current, sshEnabled: !enabled } : current));
     }
   };
-  const refreshUsbSettings = async () => {
+  const refreshUsbSettings = async (notifyFailure = true) => {
     try {
       const saved = await getConfig();
       setConfig((current) => (current ? {
@@ -126,8 +127,13 @@ export function Settings({ config, setConfig }: {
         usbNetworkPaused: saved.usbNetworkPaused,
         mtpEnabled: saved.mtpEnabled,
       } : current));
+      setUsbSettingsRefreshFailed(false);
     } catch (error) {
-      // Keep the previous values when the refresh itself fails.
+      // Keep the last known values; surface a localized, retryable failure.
+      setUsbSettingsRefreshFailed(true);
+      if (notifyFailure) {
+        toaster.toast({ title: t("settings.usbSettingsRefreshError"), body: String(error) });
+      }
     }
   };
   const setMtpEnabled = async (enabled: boolean) => {
@@ -139,7 +145,7 @@ export function Settings({ config, setConfig }: {
       setConfig((current) => (current ? { ...current, mtpEnabled: applied } : current));
       await refreshUsbSettings();
     } catch (error) {
-      await refreshUsbSettings();
+      await refreshUsbSettings(false);
       toaster.toast({ title: t("settings.usbSettingsError"), body: String(error) });
     } finally {
       usbSettingsBusy.current = false;
@@ -147,15 +153,26 @@ export function Settings({ config, setConfig }: {
     }
   };
   const setUsbNetworkEnabled = async (enabled: boolean) => {
-    if (usbSettingsBusy.current || config.usbNetworkPaused) return;
+    if (usbSettingsBusy.current || config.usbNetworkPaused || usbSettingsRefreshFailed) return;
     usbSettingsBusy.current = true;
     setUsbSettingsSaving(true);
     try {
       const applied = await applyUsbNetworkEnabled(enabled);
       setConfig((current) => (current ? { ...current, usbNetworkEnabled: applied } : current));
     } catch (error) {
-      await refreshUsbSettings();
+      await refreshUsbSettings(false);
       toaster.toast({ title: t("settings.usbSettingsError"), body: String(error) });
+    } finally {
+      usbSettingsBusy.current = false;
+      setUsbSettingsSaving(false);
+    }
+  };
+  const retryUsbSettingsRefresh = async () => {
+    if (usbSettingsBusy.current) return;
+    usbSettingsBusy.current = true;
+    setUsbSettingsSaving(true);
+    try {
+      await refreshUsbSettings();
     } finally {
       usbSettingsBusy.current = false;
       setUsbSettingsSaving(false);
@@ -306,7 +323,7 @@ export function Settings({ config, setConfig }: {
             label={t("settings.usbNetwork")}
             description={t("settings.usbNetworkDescription")}
             value={!!config.usbNetworkEnabled}
-            disabled={usbSettingsSaving || !!config.usbNetworkPaused}
+            disabled={usbSettingsSaving || !!config.usbNetworkPaused || usbSettingsRefreshFailed}
             onChange={setUsbNetworkEnabled}
           />
         )}
@@ -360,6 +377,15 @@ export function Settings({ config, setConfig }: {
           disabled={usbSettingsSaving}
           onChange={setMtpEnabled}
         />
+        {usbSettingsRefreshFailed && (
+          <ButtonRow
+            layout="below"
+            onClick={retryUsbSettingsRefresh}
+            disabled={usbSettingsSaving}
+          >
+            {t("settings.retryUsbSettings")}
+          </ButtonRow>
+        )}
       </PanelSection>
       <PanelSection title={t("settings.diagnostics")}>
         <ToggleRow

@@ -57,6 +57,8 @@ export const en = {
   "settings.usbNetwork": "Enable USB SSH",
   "settings.usbNetworkDescription": "Connect using a USB cable to 172.16.42.1",
   "settings.usbSettingsError": "Could not apply USB settings",
+  "settings.usbSettingsRefreshError": "Could not refresh USB status",
+  "settings.retryUsbSettings": "Retry USB status refresh",
   "settings.osVersion": "OS Version",
   "common.unknown": "unknown",
   "settings.experimental": "Experimental",
