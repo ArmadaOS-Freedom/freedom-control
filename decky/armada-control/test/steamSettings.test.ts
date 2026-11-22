@@ -72,10 +72,30 @@ test("legacy global values reset to 1280x720 and write store", async () => {
 });
 
 test("setter write accepted even when store has not refreshed", async () => {
-  const { calls, store } = install({ updateStoreOnSet: false });
+  const { calls, store } = install({ store: new Map<string, string>([[KEY, "Native"]]), updateStoreOnSet: false });
   assert.equal(await initializeGlobalResolution(), "1280x720");
+  assert.equal(store.get(KEY), "Native");
+  assert.equal(await initializeGlobalResolution(), "1280x720");
+  assert.equal(getGlobalResolution(), "1280x720");
   assert.deepEqual(calls, [{ key: KEY, value: "1280x720" }]);
-  assert.equal(store.has(KEY), false);
+  store.set(KEY, "1280x720");
+  assert.equal(getGlobalResolution(), "1280x720");
+  store.set(KEY, "1920x1080");
+  assert.equal(await initializeGlobalResolution(), "1920x1080");
+});
+
+test("manual Native during lag succeeds and expires fallback", async () => {
+  const { calls, store } = install({ store: new Map<string, string>([[KEY, "Native"]]), updateStoreOnSet: false });
+  assert.equal(await initializeGlobalResolution(), "1280x720");
+  assert.equal(calls.length, 1);
+  assert.equal(await setGlobalResolution("Native"), "Native");
+  assert.equal(store.get(KEY), "Native");
+  assert.equal(getGlobalResolution(), "Native");
+  assert.equal(await initializeGlobalResolution(), "Native");
+  assert.deepEqual(calls, [
+    { key: KEY, value: "1280x720" },
+    { key: KEY, value: "Native" },
+  ]);
 });
 
 test("explicit presets preserved", async () => {

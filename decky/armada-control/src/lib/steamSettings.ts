@@ -10,15 +10,32 @@ export const resolutionOptions = [
   { data: "960x540", label: "960x540" },
 ];
 
+let pendingFallback: { store: unknown; staleValue: string | undefined } | null = null;
+
+function resolveCached(raw: unknown): string {
+  if (
+    pendingFallback &&
+    window.settingsStore === pendingFallback.store &&
+    raw === pendingFallback.staleValue
+  ) {
+    return "1280x720";
+  }
+  pendingFallback = null;
+  return (typeof raw === "string" ? raw : "") || "Default";
+}
+
 export function getGlobalResolution(): string {
-  return window.settingsStore?.GetClientSetting?.(GLOBAL_RESOLUTION_KEY)?.[0] || "Default";
+  const raw = window.settingsStore?.GetClientSetting?.(GLOBAL_RESOLUTION_KEY)?.[0];
+  return resolveCached(raw);
 }
 
 export async function setGlobalResolution(value: string): Promise<string> {
-  const setting = window.settingsStore?.GetClientSetting?.(GLOBAL_RESOLUTION_KEY);
+  const store = window.settingsStore;
+  const setting = store?.GetClientSetting?.(GLOBAL_RESOLUTION_KEY);
   const setter = setting?.[1];
   if (!setter) throw new Error("Steam settings are unavailable");
   await Promise.resolve(setter(value));
+  pendingFallback = null;
   return value || "Default";
 }
 
@@ -36,10 +53,15 @@ export function initializeGlobalResolution(): Promise<string> {
     const setter = setting?.[1];
     const storage = window.localStorage;
     if (!setter || !storage || storage.getItem(STARTUP_MARKER_KEY)) {
-      return rawCurrent || "Default";
+      return resolveCached(rawCurrent);
     }
     if (!rawCurrent || rawCurrent === "Native" || rawCurrent === "Default") {
+      const store = window.settingsStore;
       await setGlobalResolution("1280x720");
+      const after = window.settingsStore?.GetClientSetting?.(GLOBAL_RESOLUTION_KEY)?.[0];
+      if (after === rawCurrent) {
+        pendingFallback = { store, staleValue: after };
+      }
       storage.setItem(STARTUP_MARKER_KEY, "1");
       return "1280x720";
     }
