@@ -140,6 +140,7 @@ module.TURNIP_DIR = module.HOME / "turnip"
 module.SYSTEM_TURNIP_DIR = module.HOME / "system-turnip"
 module.HOME.mkdir(parents=True)
 module.TURNIP_DIR.mkdir(parents=True)
+module.os.geteuid = lambda: 1000
 driver = module.TURNIP_DIR / "custom-driver"
 driver.mkdir()
 (driver / "libvulkan_freedreno.so").write_text("driver")
