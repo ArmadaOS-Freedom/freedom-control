@@ -16,7 +16,7 @@ import { ButtonRow, ControlRow, SelectEdit, SliderEdit, ToggleRow } from "../com
 import { ArmadaModalRoot } from "../components/ArmadaModalRoot";
 import { getCurrentLocale, t, translateLabel } from "../i18n";
 import { findPreset, localized, resolveEnvValues } from "../lib/envPresets";
-import { getGlobalResolution, setGlobalResolution } from "../lib/steamSettings";
+import { getAppResolution, getGlobalResolution, initializeGlobalResolution, resolutionOptions, setGlobalResolution } from "../lib/steamSettings";
 import { clone } from "../lib/util";
 import { normalizeSchedulerSelection } from "../lib/schedulerSelection";
 import { availableGames, editTargetOptions } from "../lib/games";
@@ -66,12 +66,6 @@ function cpulistError(text: string, cpuCount: number): string {
   return seen.size ? "" : t("compatibility.enterCores");
 }
 
-const resolutionOptions = [
-  { data: "Default", label: "Default" },
-  { data: "Native", label: "Native" },
-  { data: "1280x720", label: "1280x720" },
-  { data: "960x540", label: "960x540" },
-];
 const fexKnobs = [
   { key: "TSOEnabled", label: "TSO Enabled" },
   { key: "X87ReducedPrecision", label: "X87 Reduced Precision" },
@@ -253,7 +247,8 @@ function EnvVarModal({
 
 export function Compatibility({ config, setConfig }: { config: Config; setConfig: Dispatch<SetStateAction<Config | null>> }) {
   const [resolution, setResolution] = useState("Default");
-  const [defaultResolution, setDefaultResolution] = useState(getGlobalResolution());
+  const [defaultResolution, setDefaultResolution] = useState(getGlobalResolution);
+  const [initializingResolution, setInitializingResolution] = useState(true);
   const [resolutionMessage, setResolutionMessage] = useState("");
   const [resettingGame, setResettingGame] = useState(false);
   const [resettingAll, setResettingAll] = useState(false);
@@ -303,18 +298,18 @@ export function Compatibility({ config, setConfig }: { config: Config; setConfig
   useEffect(() => {
     let cancelled = false;
     async function loadResolution() {
-      if (!game?.appid || !apps?.GetResolutionOverrideForApp) {
+      if (!game?.appid) {
         setResolution("Default");
         setResolutionMessage("");
         return;
       }
       try {
-        const current = await apps.GetResolutionOverrideForApp(Number(game.appid));
+        const current = await getAppResolution(Number(game.appid));
         if (!cancelled) {
           setResolution(current || "Default");
           setResolutionMessage("");
         }
-      } catch (error) {
+      } catch {
         if (!cancelled) setResolutionMessage(t("compatibility.resolutionUnavailable"));
       }
     }
@@ -385,7 +380,20 @@ export function Compatibility({ config, setConfig }: { config: Config; setConfig
     };
   }, [apps]);
   useEffect(() => {
-    setDefaultResolution(getGlobalResolution());
+    let cancelled = false;
+    initializeGlobalResolution()
+      .then((value) => {
+        if (!cancelled) setDefaultResolution(value);
+      })
+      .catch((error) => {
+        console.warn("[armada-control] global resolution init failed", error);
+      })
+      .finally(() => {
+        if (!cancelled) setInitializingResolution(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
   const gameSettings = game?.appid ? tweaks.games[game.appid] || {} : {};
   const editingDefault = !game?.appid;
@@ -454,12 +462,13 @@ export function Compatibility({ config, setConfig }: { config: Config; setConfig
     }
   };
   const setSteamDefaultResolution = async (value: string) => {
-    setDefaultResolution(value);
+    const previous = defaultResolution;
     try {
       const applied = await setGlobalResolution(value);
       setResolutionMessage("");
       setDefaultResolution(applied || "Default");
     } catch (error) {
+      setDefaultResolution(previous);
       setResolutionMessage(t("compatibility.setDefaultResolutionError"));
     }
   };
@@ -885,7 +894,7 @@ export function Compatibility({ config, setConfig }: { config: Config; setConfig
                 }}
               />
             )}
-            <SelectEdit label={t("compatibility.gameResolution")} value={defaultResolution} options={resolutionOptions.map((option) => ({ ...option, label: translateLabel(option.label) }))} onChange={setSteamDefaultResolution} />
+            <SelectEdit label={t("compatibility.gameResolution")} value={defaultResolution} options={resolutionOptions.map((option) => ({ ...option, label: translateLabel(option.label) }))} onChange={setSteamDefaultResolution} disabled={initializingResolution} />
           </>
         ) : (
           <>

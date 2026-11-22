@@ -15,6 +15,7 @@ import { factoryDefaultTransition } from "./lib/protonPolicy";
 import { installY700FrameRateChoices } from "./lib/y700FrameRateChoices";
 import { registerSteamProfileLocalization } from "./lib/steamProfileLocalization";
 import { installSystemInfoCpuNameFallback } from "./lib/steamSystemInfo";
+import { initializeGlobalResolution } from "./lib/steamSettings";
 import { registerTouchController } from "./touch/integration";
 
 // Gamescope's edge swipes toggle the Steam menus, so a drag inside an open
@@ -43,6 +44,9 @@ export default definePlugin(() => {
   // below depends on installed games and must not delay or gate this.
   syncHomePower().catch((error) => {
     console.warn("[armada-control] home power sync failed", error);
+  });
+  initializeGlobalResolution().catch((error) => {
+    console.warn("[armada-control] global resolution init failed", error);
   });
   let unregisterDownloadWatcher = () => {};
   let disposeFrameRateChoices = () => {};
