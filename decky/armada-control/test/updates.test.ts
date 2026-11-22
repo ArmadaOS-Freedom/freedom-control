@@ -15,7 +15,8 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 `;
 const runPython = (code, args = []) => {
-  const result = spawnSync("python", ["-c", python + code, fileURLToPath(new URL("../py_modules/armada_control/updates.py", import.meta.url)), ...args], { encoding: "utf8" });
+  const executable = process.platform === "win32" ? "python" : "python3";
+  const result = spawnSync(executable, ["-c", python + code, fileURLToPath(new URL("../py_modules/armada_control/updates.py", import.meta.url)), ...args], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return result.stdout;
 };
