@@ -1,17 +1,25 @@
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
 import re
 import shutil
 import ssl
-import importlib.util
+import stat
+import subprocess
 import tarfile
 import tempfile
 import threading
 import urllib.parse
 import urllib.request
 import zipfile
+from contextlib import contextmanager
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 
 CATALOG_URL = os.environ.get("ARMADA_UPDATE_CATALOG_URL", "")
@@ -36,6 +44,15 @@ MAX_FILES = 100000
 _SSL_CONTEXT = None
 _PROGRESS_LOCK = threading.Lock()
 _PROGRESS = {}
+_INSTALL_LOCKS_LOCK = threading.Lock()
+_INSTALL_LOCKS = {}
+
+
+class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        if urllib.parse.urlsplit(new_url).scheme.lower() != "https":
+            raise urllib.error.HTTPError(new_url, code, "redirect to a non-HTTPS URL refused", headers, file_pointer)
+        return super().redirect_request(request, file_pointer, code, message, headers, new_url)
 
 
 class UpdateError(RuntimeError):
@@ -61,7 +78,73 @@ def _urlopen(request, timeout):
         except (ImportError, ValueError):
             pass
         _SSL_CONTEXT = ssl.create_default_context(cafile=cafile)
-    return urllib.request.urlopen(request, timeout=timeout, context=_SSL_CONTEXT)
+    opener = urllib.request.build_opener(
+        _HttpsOnlyRedirectHandler,
+        urllib.request.HTTPSHandler(context=_SSL_CONTEXT),
+    )
+    return opener.open(request, timeout=timeout)
+
+
+def _ensure_safe_directory(path, create=False):
+    path = pathlib.Path(os.path.abspath(path))
+    current = pathlib.Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir(mode=0o755)
+            info = current.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise UpdateError("update path contains a symlink or non-directory")
+    return True
+
+
+def _safe_store(path, create=False):
+    home = pathlib.Path(os.path.abspath(HOME))
+    path = pathlib.Path(os.path.abspath(path))
+    if path == home or not path.is_relative_to(home):
+        raise UpdateError("update store resolves outside the Armada home directory")
+    _ensure_safe_directory(home, create=create)
+    user_data = home / ".local/share"
+    if path.is_relative_to(user_data):
+        _ensure_safe_directory(home / ".local", create=create)
+        _ensure_safe_directory(user_data, create=create)
+    _ensure_safe_directory(path, create=create)
+    return path
+
+
+@contextmanager
+def _installation_lock(path):
+    store = pathlib.Path(path)
+    process_lock = _INSTALL_LOCKS.setdefault(str(store), threading.Lock())
+    with process_lock:
+        if fcntl is None:
+            yield
+            return
+        lock_path = store / ".armada-control-update.lock"
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+
+def _run_as_armada(code, *arguments):
+    result = subprocess.run(
+        ["/usr/bin/runuser", "-u", "armada", "--", "/usr/bin/python3", "-c", code, *map(str, arguments)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode:
+        raise UpdateError(result.stderr.strip() or "package filesystem operation failed")
+    return result.stdout.strip()
 
 
 def _fetch(url):
@@ -107,13 +190,29 @@ def _catalog(raw):
 
 
 def _installed(kind, item_id):
+    if kind == "turnip" and isinstance(item_id, str) and item_id.startswith(USER_PREFIX):
+        item_id = item_id[len(USER_PREFIX):]
     if kind == "turnip":
-        return (TURNIP_DIR / item_id / "libvulkan_freedreno.so").is_file()
-    return any(
-        (root / item_id / marker).is_file()
-        for root in (COMPAT_DIR, SYSTEM_COMPAT_DIR)
-        for marker in ("compatibilitytool.vdf", "toolmanifest.vdf")
-    )
+        if not _safe_id(item_id):
+            return False
+        try:
+            store = _safe_store(TURNIP_DIR)
+        except (OSError, UpdateError):
+            return False
+        return (store / item_id / "libvulkan_freedreno.so").is_file()
+    for root in (COMPAT_DIR, SYSTEM_COMPAT_DIR):
+        direct = root / item_id
+        if any((direct / marker).is_file() for marker in ("compatibilitytool.vdf", "toolmanifest.vdf")):
+            return True
+        if root == COMPAT_DIR and root.is_dir():
+            for package_dir in root.iterdir():
+                manifest = package_dir / ".armada-control-update.json"
+                try:
+                    if json.loads(manifest.read_text(encoding="utf-8")).get("catalogId") == item_id:
+                        return True
+                except (OSError, ValueError):
+                    continue
+    return False
 
 
 def _local_item(kind, item_id, label, version, removable):
@@ -124,6 +223,15 @@ def _local_item(kind, item_id, label, version, removable):
         "version": version,
         "removable": removable,
     }
+
+
+def _compat_catalog_id(directory):
+    try:
+        value = json.loads((directory / ".armada-control-update.json").read_text(encoding="utf-8"))
+        catalog_id = value.get("catalogId")
+        return catalog_id if _safe_id(catalog_id) else directory.name
+    except (OSError, ValueError):
+        return directory.name
 
 
 def local():
@@ -140,7 +248,7 @@ def local():
         for library in sorted(TURNIP_DIR.glob("*/libvulkan_freedreno.so")):
             item_id = library.parent.name
             if not any(item["id"] == item_id for item in items) and _installed("turnip", item_id):
-                items.append(_local_item("turnip", item_id, item_id, "", item_id != "stable"))
+                items.append(_local_item("turnip", USER_PREFIX + item_id, item_id, "", item_id != "stable"))
     compatibility_items = {}
     for compat_root in (SYSTEM_COMPAT_DIR, COMPAT_DIR):
       if compat_root.is_dir():
@@ -160,25 +268,60 @@ def local():
                         break
             except OSError:
                 pass
-            compatibility_items[item_id] = _local_item("compatibility", item_id, label, version, compat_root == COMPAT_DIR)
+            catalog_id = _compat_catalog_id(marker.parent) if compat_root == COMPAT_DIR else item_id
+            item = _local_item("compatibility", catalog_id, label, version, compat_root == COMPAT_DIR)
+            item["installedId"] = item_id
+            compatibility_items[catalog_id] = item
     items.extend(compatibility_items.values())
     return items
 
 
 def delete_local(kind, item_id):
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        code = "import importlib.util,json,sys; s=importlib.util.spec_from_file_location('updates',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(json.dumps(m.delete_local(sys.argv[2],sys.argv[3])))"
+        return json.loads(_run_as_armada(code, __file__, kind, item_id))
+    selected_id = item_id
     if kind == "turnip" and isinstance(item_id, str) and item_id.startswith(USER_PREFIX):
         name = item_id[len(USER_PREFIX):]
         if not _safe_id(name):
             raise UpdateError("invalid driver id")
-        target = TURNIP_DIR / name
+        store_path = TURNIP_DIR
     elif kind == "compatibility" and _safe_id(item_id):
-        target = COMPAT_DIR / item_id
+        name = item_id
+        store_path = COMPAT_DIR
     else:
         raise UpdateError("the built-in driver cannot be removed")
-    if not target.is_dir():
-        raise UpdateError("driver is not installed")
-    shutil.rmtree(target)
-    return {"kind": kind, "id": item_id, "removed": True}
+    store = _safe_store(store_path)
+    target = store / name
+    if kind == "compatibility" and not target.exists():
+        target = next((candidate for candidate in store.iterdir() if _compat_catalog_id(candidate) == item_id), target)
+        name = target.name
+    if target.is_symlink() or not target.is_dir() or not target.resolve().is_relative_to(store):
+        raise UpdateError("package is not installed in its expected store")
+    if not _safe_id(name):
+        raise UpdateError("invalid installed package directory name")
+    with _installation_lock(store):
+        if kind == "compatibility":
+            try:
+                selected_id = _compat_catalog_id(target)
+            except (OSError, ValueError):
+                selected_id = item_id
+        shutil.rmtree(target)
+    return {"kind": kind, "id": item_id, "selectionId": selected_id, "installedId": name, "removed": True}
+
+
+def local_selection_id(kind, item_id):
+    if kind == "turnip" and isinstance(item_id, str) and item_id.startswith(USER_PREFIX):
+        return item_id[len(USER_PREFIX):]
+    if kind == "compatibility" and _safe_id(item_id):
+        store = _safe_store(COMPAT_DIR)
+        direct = store / item_id
+        if direct.is_dir() and not direct.is_symlink():
+            return direct.name
+        for candidate in store.iterdir():
+            if candidate.is_dir() and not candidate.is_symlink() and _compat_catalog_id(candidate) == item_id:
+                return candidate.name
+    return item_id
 
 
 def _state(catalog):
@@ -365,19 +508,22 @@ def _safe_extract(archive, destination):
             if count > MAX_FILES or total > MAX_PACKAGE_BYTES:
                 raise UpdateError("update package is too large")
             target = (destination / entry.filename).resolve()
-            if not str(target).startswith(str(root) + os.sep):
+            if target == root or not target.is_relative_to(root):
                 raise UpdateError("update package contains an unsafe path")
             target.parent.mkdir(parents=True, exist_ok=True)
             mode = (entry.external_attr >> 16) & 0o170000
             if mode == 0o120000:
                 link = bundle.read(entry).decode("utf-8", "strict")
                 link_target = (target.parent / link).resolve()
-                if not str(link_target).startswith(str(root) + os.sep):
+                if not link_target.is_relative_to(root):
                     raise UpdateError("update package contains an unsafe link")
                 os.symlink(link, target)
                 continue
             with bundle.open(entry) as source, target.open("wb") as output:
                 shutil.copyfileobj(source, output, 1024 * 1024)
+            mode = (entry.external_attr >> 16) & 0o777
+            if mode:
+                target.chmod(mode & ~0o6000)
 
 
 def _safe_extract_tar(archive, destination):
@@ -390,7 +536,10 @@ def _safe_extract_tar(archive, destination):
             if not (entry.isfile() or entry.isdir() or entry.issym() or entry.islnk()):
                 raise UpdateError("compatibility package contains an unsafe link or special file")
             target = (destination / entry.name).resolve()
-            if not str(target).startswith(str(root) + os.sep):
+            if target == root:
+                if not entry.isdir():
+                    raise UpdateError("update package contains an unsafe path")
+            elif not target.is_relative_to(root):
                 raise UpdateError("update package contains an unsafe path")
             if entry.isfile():
                 count += 1
@@ -402,19 +551,21 @@ def _safe_extract_tar(archive, destination):
             target.parent.mkdir(parents=True, exist_ok=True)
             if entry.isdir():
                 target.mkdir(parents=True, exist_ok=True)
+                target.chmod(entry.mode & 0o777 & ~0o6000)
             elif entry.isfile():
                 source = bundle.extractfile(entry)
                 if source is None:
                     raise UpdateError("invalid compatibility archive")
                 with source, target.open("wb") as output:
                     shutil.copyfileobj(source, output, 1024 * 1024)
+                target.chmod(entry.mode & 0o777 & ~0o6000)
         for entry in entries:
             if not (entry.issym() or entry.islnk()):
                 continue
             target = destination / entry.name
             link_value = pathlib.PurePosixPath(entry.linkname)
             link_target = (target.parent / pathlib.Path(*link_value.parts)).resolve() if entry.issym() else (destination / pathlib.Path(*link_value.parts)).resolve()
-            if not str(link_target).startswith(str(root) + os.sep):
+            if not link_target.is_relative_to(root):
                 raise UpdateError("update package contains an unsafe link")
             target.parent.mkdir(parents=True, exist_ok=True)
             if entry.issym():
@@ -431,6 +582,96 @@ def _package_root(directory, kind):
         if any(marker in files for marker in markers):
             return pathlib.Path(root)
     raise UpdateError("update package does not contain its required runtime manifest")
+
+
+def _publish_package(source, store_path, package_id, item):
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        handoff = pathlib.Path(tempfile.mkdtemp(prefix="armada-update-handoff-"))
+        os.chmod(handoff, 0o711)
+        try:
+            handoff_source = handoff / source.name
+            shutil.copytree(source, handoff_source, symlinks=True)
+            code = "import importlib.util,json,pathlib,sys; s=importlib.util.spec_from_file_location('updates',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(json.dumps(m._publish_package(pathlib.Path(sys.argv[2]),pathlib.Path(sys.argv[3]),sys.argv[4],json.loads(sys.argv[5]))))"
+            output = _run_as_armada(code, __file__, handoff_source, store_path, package_id, json.dumps(item))
+            return json.loads(output)
+        finally:
+            shutil.rmtree(handoff, ignore_errors=True)
+    store = _safe_store(store_path, create=True)
+    package_name = source.name if item["kind"] == "compatibility" else package_id
+    if not _safe_id(package_name):
+        raise UpdateError("package directory name is invalid")
+    with _installation_lock(store):
+        destination = store / package_name
+        staging = store / ("." + package_name + ".tmp")
+        backup = store / ("." + package_name + ".old")
+        if destination.is_symlink():
+            raise UpdateError("refusing to replace a symlinked package")
+        if destination.exists() and item["kind"] == "compatibility" and not any(
+            (destination / marker).is_file() for marker in ("toolmanifest.vdf", "compatibilitytool.vdf")
+        ):
+            raise UpdateError("refusing to replace an unrelated compatibility tool directory")
+        if backup.exists() and not _valid_install(destination, item["kind"]):
+            if destination.exists():
+                shutil.rmtree(destination)
+            backup.rename(destination)
+        elif backup.exists():
+            shutil.rmtree(backup)
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.copytree(source, staging, symlinks=True)
+        if item["kind"] == "compatibility":
+            (staging / ".armada-control-update.json").write_text(
+                json.dumps({"catalogId": package_id}) + "\n", encoding="utf-8"
+            )
+        moved_old = False
+        try:
+            if destination.exists():
+                destination.rename(backup)
+                moved_old = True
+            staging.rename(destination)
+        except Exception:
+            if moved_old and backup.exists() and not destination.exists():
+                backup.rename(destination)
+            raise
+        shutil.rmtree(backup, ignore_errors=True)
+    return package_name
+
+
+def _valid_install(path, kind):
+    if path.is_symlink() or not path.is_dir():
+        return False
+    markers = ("libvulkan_freedreno.so",) if kind == "turnip" else ("compatibilitytool.vdf", "toolmanifest.vdf")
+    return any((path / marker).is_file() for marker in markers)
+
+
+def _install_archive(archive, item):
+    with tempfile.TemporaryDirectory(prefix="armada-update-", dir=HOME) as work:
+        unpacked = pathlib.Path(work) / "unpacked"
+        unpacked.mkdir()
+        if item["kind"] == "compatibility" and tarfile.is_tarfile(archive):
+            _safe_extract_tar(archive, unpacked)
+        else:
+            _safe_extract(archive, unpacked)
+        source = _package_root(unpacked, item["kind"])
+        if item["kind"] == "turnip":
+            if not (source / "libvulkan_freedreno.so").is_file():
+                raise UpdateError("Turnip package is missing its runtime files")
+            if not (source / "variant.json").is_file():
+                meta = {}
+                try:
+                    meta = json.loads((source / "meta.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    pass
+                (source / "variant.json").write_text(json.dumps({
+                    "label": item["label"],
+                    "version": item["version"] or str(meta.get("version") or ""),
+                }) + "\n", encoding="utf-8")
+            destination_root = TURNIP_DIR
+        else:
+            if not ((source / "compatibilitytool.vdf").is_file() or (source / "toolmanifest.vdf").is_file()):
+                raise UpdateError("compatibility package is missing its Steam tool manifest")
+            destination_root = COMPAT_DIR
+        package_name = _publish_package(source, destination_root, item["id"], item)
+        return {"id": item["id"], "installedId": package_name, "kind": item["kind"], "label": item["label"], "version": item["version"], "installed": True}
 
 
 def install(item_id):
@@ -468,48 +709,21 @@ def _install(item_id):
                 _set_progress(item_id, "downloading", max(1, percent), total, expected)
         if item.get("sha256") and digest.hexdigest().lower() != item["sha256"]:
             raise UpdateError("update checksum mismatch")
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            handoff = pathlib.Path(tempfile.mkdtemp(prefix="armada-update-handoff-"))
+            os.chmod(handoff, 0o755)
+            try:
+                user_archive = handoff / "package.zip"
+                shutil.copyfile(archive, user_archive)
+                user_archive.chmod(0o644)
+                code = "import importlib.util,json,pathlib,sys; s=importlib.util.spec_from_file_location('updates',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(json.dumps(m._install_archive(pathlib.Path(sys.argv[2]),json.loads(sys.argv[3]))))"
+                result = json.loads(_run_as_armada(code, __file__, user_archive, json.dumps(item)))
+            finally:
+                shutil.rmtree(handoff, ignore_errors=True)
+            _set_progress(item_id, "complete", 100, total, expected)
+            return result
         _set_progress(item_id, "extracting", 92, total, expected)
-        unpacked = pathlib.Path(work) / "unpacked"
-        unpacked.mkdir()
-        if item["kind"] == "compatibility" and tarfile.is_tarfile(archive):
-            _safe_extract_tar(archive, unpacked)
-        else:
-            _safe_extract(archive, unpacked)
-        source = _package_root(unpacked, item["kind"])
-        if item["kind"] == "turnip":
-            if not (source / "libvulkan_freedreno.so").is_file():
-                raise UpdateError("Turnip package is missing its runtime files")
-            if not (source / "variant.json").is_file():
-                meta = {}
-                try:
-                    meta = json.loads((source / "meta.json").read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    pass
-                (source / "variant.json").write_text(json.dumps({
-                    "label": item["label"],
-                    "version": item["version"] or str(meta.get("version") or ""),
-                }) + "\n", encoding="utf-8")
-            destination_root = TURNIP_DIR
-        else:
-            if not ((source / "compatibilitytool.vdf").is_file() or (source / "toolmanifest.vdf").is_file()):
-                raise UpdateError("compatibility package is missing its Steam tool manifest")
-            destination_root = COMPAT_DIR
-        destination_root.mkdir(mode=0o755, parents=True, exist_ok=True)
         _set_progress(item_id, "installing", 97, total, expected)
-        staging = destination_root / ("." + item["id"] + ".tmp")
-        destination = destination_root / item["id"]
-        package_name = source.name
-        if item["kind"] == "compatibility":
-            destination = destination_root / package_name
-            if destination.exists() and not (destination / "toolmanifest.vdf").is_file() and not (destination / "compatibilitytool.vdf").is_file():
-                raise UpdateError("refusing to replace an unrelated compatibility tool directory")
-        shutil.rmtree(staging, ignore_errors=True)
-        shutil.copytree(source, staging, symlinks=True)
-        backup = destination_root / ("." + item["id"] + ".old")
-        shutil.rmtree(backup, ignore_errors=True)
-        if destination.exists():
-            destination.rename(backup)
-        staging.rename(destination)
-        shutil.rmtree(backup, ignore_errors=True)
+        result = _install_archive(archive, item)
     _set_progress(item_id, "complete", 100, total, expected)
-    return {"id": item["id"], "kind": item["kind"], "label": item["label"], "version": item["version"], "installed": True}
+    return result

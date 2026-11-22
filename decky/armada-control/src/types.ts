@@ -68,6 +68,7 @@ export interface UpdateItem {
   sha256: string;
   verified?: boolean;
   installed: boolean;
+  installedId?: string;
 }
 
 export interface UpdatesState {
@@ -84,6 +85,9 @@ export interface LocalUpdate {
   label: string;
   version: string;
   removable: boolean;
+  selectionId?: string;
+  selectionCleared?: boolean;
+  installedId?: string;
 }
 
 export interface UpdateProgress {

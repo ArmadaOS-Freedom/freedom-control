@@ -19,7 +19,7 @@ Freedom Control 沿用 Armada Control 的插件架构与宿主服务接口，保
 - **CPU governor 显示名称**：界面以可读名称显示所选 governor，而不只是内核标识符。
 - **触屏手柄单页**：内置触摸屏上的单页手柄，支持 Xbox/PS/Switch 预设、每个预设独立的四向/八向方向键、全局统一的白色/黑色按键颜色、删除自定义预设、删除并还原模板组件、四枚面键整体移动缩放、手柄导航、显示隐藏与震动。全屏布局编辑器支持左右切换工具面板；平板预设左右对称、摇杆保持圆形并等比缩放。可选的“全屏触控右摇杆”默认关闭，开启后隐藏固定右摇杆，在空白区域滑动即可控制右摇杆，停止或松手后回中。
 - **TF 卡游戏库标签页**：把已分配 TF 卡的 Linux 保留分区转换为 Steam 游戏库，同时保留该卡的 Android 存储。
-- **更新标签页**：在线检查 Armada 的 Linux Vulkan 游戏驱动（Turnip 变体）和 ARM64 Proton 兼容层。Turnip 来自 DroidDeck 使用的 Banners-Turnip / WinNative-Emu 发布源；Proton 来自 GE-Proton、CachyOS Proton 和 DroidDeck Proton 发布源。兼容层仅筛选 ARM64 tar 包，不提供 Android 驱动或 x86 Proton。下载使用 HTTPS 和发布方提供的校验值（若有），并限制归档路径、大小与文件数量。
+- **更新标签页**：默认直接检查 Armada 的 Linux Vulkan 游戏驱动（Turnip 变体）和 ARM64 Proton 兼容层发布源，也支持可选目录覆盖。下载重定向始终限制为 HTTPS；发布方提供 SHA-256 时会校验，并限制归档路径、权限位、大小与文件数量。安装采用可恢复的目录切换。
 
 SM8850 目前处于基础集成阶段，性能调优仍在进行。
 

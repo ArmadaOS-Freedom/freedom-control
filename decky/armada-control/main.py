@@ -25,8 +25,8 @@ from armada_control.system import (
     swipe_gestures_enabled,
     swipe_gestures_in_game_enabled,
 )
-from armada_control.tweaks import load_compat_applied, save_compat_applied, save_tweaks
-from armada_control.updates import current as current_updates, delete_local, install as install_update, local as local_updates, progress as update_progress, refresh as refresh_updates
+from armada_control.tweaks import load_compat_applied, load_tweaks, save_compat_applied, save_tweaks
+from armada_control.updates import current as current_updates, delete_local, install as install_update, local as local_updates, local_selection_id, progress as update_progress, refresh as refresh_updates
 from armada_control.fan_curves import get_state as get_fans_state, save_all as save_fan_curves, save_charging_pwm
 from armada_control.fan_sensors import get_current_temp
 from armada_control.home_power import HomePower
@@ -45,6 +45,7 @@ class Plugin:
         # one critical section: without it two overlapping RPCs (or startup and
         # an RPC) could apply the older of two policies last.
         self._touch_policy_lock = asyncio.Lock()
+        self._tweaks_lock = asyncio.Lock()
 
     async def _main(self):
         try:
@@ -116,7 +117,8 @@ class Plugin:
         return await self.get_config()
 
     async def save_tweaks(self, data):
-        await asyncio.to_thread(save_tweaks, data)
+        async with self._tweaks_lock:
+            await asyncio.to_thread(save_tweaks, data)
         return await self.get_config()
 
     async def get_compat_applied(self):
@@ -141,7 +143,27 @@ class Plugin:
         return await asyncio.to_thread(local_updates)
 
     async def delete_local_update(self, kind, update_id):
-        return await asyncio.to_thread(delete_local, kind, update_id)
+        async with self._tweaks_lock:
+            tweaks = await asyncio.to_thread(load_tweaks)
+            global_tweaks = dict(tweaks.get("global", {}))
+            selected = global_tweaks.get("turnipDriver") if kind == "turnip" else global_tweaks.get("windowsCompatTool")
+            field = "turnipDriver" if kind == "turnip" else "windowsCompatTool"
+            installed_id = await asyncio.to_thread(local_selection_id, kind, update_id)
+            matches = selected in (update_id, installed_id)
+            if matches:
+                updated = dict(tweaks)
+                global_tweaks.pop(field, None)
+                updated["global"] = global_tweaks
+                await asyncio.to_thread(save_tweaks, updated)
+                try:
+                    result = await asyncio.to_thread(delete_local, kind, update_id)
+                except Exception:
+                    await asyncio.to_thread(save_tweaks, tweaks)
+                    raise
+                result["selectionCleared"] = True
+            else:
+                result = await asyncio.to_thread(delete_local, kind, update_id)
+        return result
 
     async def set_swipe_gestures_enabled(self, enabled):
         result = await asyncio.to_thread(set_swipe_gestures_enabled, enabled)
