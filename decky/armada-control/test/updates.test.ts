@@ -141,6 +141,8 @@ module.SYSTEM_TURNIP_DIR = module.HOME / "system-turnip"
 module.HOME.mkdir(parents=True)
 module.TURNIP_DIR.mkdir(parents=True)
 module.os.geteuid = lambda: 1000
+module.SYSTEM_TURNIP_DIR = pathlib.Path(sys.argv[2]) / "missing-system-turnip"
+module._safe_store = lambda path, create=False: pathlib.Path(path)
 driver = module.TURNIP_DIR / "custom-driver"
 driver.mkdir()
 (driver / "libvulkan_freedreno.so").write_text("driver")
