@@ -142,13 +142,11 @@ module.HOME.mkdir(parents=True)
 module.TURNIP_DIR.mkdir(parents=True)
 module.os.geteuid = lambda: 1000
 module.SYSTEM_TURNIP_DIR = pathlib.Path(sys.argv[2]) / "missing-system-turnip"
-module._safe_store = lambda path, create=False: pathlib.Path(path)
 driver = module.TURNIP_DIR / "custom-driver"
 driver.mkdir()
 (driver / "libvulkan_freedreno.so").write_text("driver")
 items = module.local()
-item = module._local_item("turnip", "user:custom-driver", "custom-driver", "", True)
-assert item["id"].startswith(module.USER_PREFIX)
+item = next(item for item in items if item["id"] == "user:custom-driver")
 assert item["removable"]
 assert module._installed("turnip", item["id"])
 module.delete_local("turnip", item["id"])
