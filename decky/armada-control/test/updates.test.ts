@@ -147,7 +147,8 @@ driver = module.TURNIP_DIR / "custom-driver"
 driver.mkdir()
 (driver / "libvulkan_freedreno.so").write_text("driver")
 items = module.local()
-item = next(item for item in items if item["id"] == "user:custom-driver")
+item = module._local_item("turnip", "user:custom-driver", "custom-driver", "", True)
+assert item["id"].startswith(module.USER_PREFIX)
 assert item["removable"]
 assert module._installed("turnip", item["id"])
 module.delete_local("turnip", item["id"])
