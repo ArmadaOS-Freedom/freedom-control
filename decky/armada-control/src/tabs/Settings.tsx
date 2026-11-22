@@ -123,6 +123,7 @@ export function Settings({ config, setConfig }: {
         ...current,
         usbNetworkEnabled: saved.usbNetworkEnabled,
         usbNetworkSupported: saved.usbNetworkSupported,
+        usbNetworkPaused: saved.usbNetworkPaused,
         mtpEnabled: saved.mtpEnabled,
       } : current));
     } catch (error) {
@@ -136,6 +137,7 @@ export function Settings({ config, setConfig }: {
     try {
       const applied = await applyMtpEnabled(enabled);
       setConfig((current) => (current ? { ...current, mtpEnabled: applied } : current));
+      await refreshUsbSettings();
     } catch (error) {
       await refreshUsbSettings();
       toaster.toast({ title: t("settings.usbSettingsError"), body: String(error) });
@@ -145,7 +147,7 @@ export function Settings({ config, setConfig }: {
     }
   };
   const setUsbNetworkEnabled = async (enabled: boolean) => {
-    if (usbSettingsBusy.current) return;
+    if (usbSettingsBusy.current || config.usbNetworkPaused) return;
     usbSettingsBusy.current = true;
     setUsbSettingsSaving(true);
     try {
@@ -304,7 +306,7 @@ export function Settings({ config, setConfig }: {
             label={t("settings.usbNetwork")}
             description={t("settings.usbNetworkDescription")}
             value={!!config.usbNetworkEnabled}
-            disabled={usbSettingsSaving}
+            disabled={usbSettingsSaving || !!config.usbNetworkPaused}
             onChange={setUsbNetworkEnabled}
           />
         )}

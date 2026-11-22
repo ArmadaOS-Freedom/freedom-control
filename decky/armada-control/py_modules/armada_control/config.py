@@ -66,6 +66,7 @@ def build_config(include_games=True):
         "mtpEnabled": mtp_enabled(),
         "usbNetworkEnabled": usb_network["enabled"],
         "usbNetworkSupported": usb_network["supported"],
+        "usbNetworkPaused": usb_network.get("paused", False),
         "desktopMode": desktop_mode(),
         "desktopModes": desktop_modes(),
         "sleepMode": env.get("ARMADA_SUSPEND_MODE", "s2idle"),

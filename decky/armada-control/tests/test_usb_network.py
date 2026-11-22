@@ -18,6 +18,17 @@ class UsbNetworkTest(unittest.TestCase):
         with mock.patch.object(system, "call", side_effect=RuntimeError("unknown action")):
             self.assertEqual(system.usb_network_state(), {"enabled": False, "supported": False})
 
+    def test_paused_is_carried_when_the_host_reports_it(self):
+        for paused in (True, False):
+            with self.subTest(paused=paused):
+                response = {"enabled": False, "supported": True, "paused": paused}
+                with mock.patch.object(system, "call", return_value=response) as call:
+                    self.assertEqual(
+                        system.usb_network_state(),
+                        {"enabled": False, "supported": True, "paused": paused},
+                    )
+                call.assert_called_once_with("get_usb_network_enabled")
+
     def test_only_the_unknown_action_runtime_error_is_swallowed(self):
         errors = [
             TimeoutError("helper timed out"),
