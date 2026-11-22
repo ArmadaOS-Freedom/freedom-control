@@ -19,6 +19,7 @@ The current snapshot provides:
 - **CPU governor labels** in the interface, so the selected governor is shown with a readable name rather than only its kernel identifier.
 - **Touch gamepad page**, one page on the built-in touchscreen with Xbox/PS/Switch presets, per-preset 4/8-way D-pad, one global white/black button color, deleting custom presets, deleting and restoring template components, moving/resizing the four face buttons as a group, controller navigation, show/hide, and haptics. The fullscreen layout editor can dock its tools on either side; tablet presets are symmetric and sticks stay circular when resized. Optional full-screen right-stick control is off by default: it hides the fixed right stick, converts swipes in empty areas into right-stick input, and returns to center when motion stops or the finger lifts.
 - **TF card game library tab**, which turns the Linux reserve partition of a prepared TF card into a Steam game library without touching the card's Android storage.
+- **Updates tab**, which checks a repository-controlled catalog and installs Armada-compatible Linux Vulkan game drivers (Turnip variants) or Linux compatibility layers (Proton/FEX packages). Downloads use HTTPS and an expected SHA-256 digest, are extracted with path traversal and size limits, and are switched into place atomically.
 
 SM8850 support is at the initial integration stage; performance tuning is ongoing.
 
@@ -36,6 +37,16 @@ tests/                  Focused SM8850 power-profile regression tests
 - `tests/sm8850-power-test.py` covers the SM8850 power-profile layering and caps against the configuration sources in this repository.
 
 The paths `decky/armada-control` and the Python package `armada_control` keep those upstream names for compatibility with existing Armada integration.
+
+## Driver and compatibility updates
+
+The Updates tab deliberately adapts DroidDeck's two-part GPU model to Armada's Linux-only runtime:
+
+- **Linux game driver**: a glibc/aarch64 Turnip package installed below `~/.local/share/armada/turnip/<id>`. Armada's existing `armada-game-launch` selects it with `VK_DRIVER_FILES` for native and FEX-launched games.
+- **Compatibility layer**: a Proton/FEX package installed below Steam's `compatibilitytools.d/<id>`. Steam discovers the package on the next Game Mode start.
+- **Android display drivers are not imported**: Armada renders through the Linux host DRM/Vulkan stack, so DroidDeck's Android driver half has no compatible destination here. The catalog must publish an Armada Linux package instead of an Android/Linux pair.
+
+By default the Updates page checks the DroidDeck-compatible release sources directly: `The412Banner/Banners-Turnip` and `WinNative-Emu/Drivers`. It only offers `-Linux.zip` game-driver assets and excludes Android/Linux bundles. A downstream build can provide a private catalog with `ARMADA_UPDATE_CATALOG_URL`; such catalogs use `updates/catalog.json` format with `kind`, `id`, `label`, `version`, `url`, and optional lowercase `sha256`.
 
 ## Power files in `system_files`
 

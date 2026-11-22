@@ -21,6 +21,9 @@ function Icon({ path, size = 20 }: { path: ReactNode; size?: number }) {
 const TAB_ICON_SIZE = 18;
 
 export const tabIcons = {
+  Updates: (
+    <Icon size={TAB_ICON_SIZE} path={<><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></>} />
+  ),
   Compatibility: (
     <Icon
       size={TAB_ICON_SIZE}

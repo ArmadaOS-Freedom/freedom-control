@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "generatedAt": "2026-11-22T12:20:00Z",
+  "updates": [
+    {
+      "id": "banners-turnip-v27-linux",
+      "kind": "turnip",
+      "label": "Banners Turnip Linux · Adreno 6xx/7xx",
+      "version": "v27.0.0-20261121-r3",
+      "description": "Linux glibc/aarch64 Turnip driver. Checked build; device testing is still required.",
+      "url": "https://github.com/The412Banner/Banners-Turnip/releases/download/v27.0.0-20261121-r3/Turnip-v27.0.0-20261121-r3-Linux.zip",
+      "sha256": "939a7f6217c84fbfa946156ad824a4a80674a78aa29fb54a8ec1cd72cd6424c"
+    }
+  ]
+}

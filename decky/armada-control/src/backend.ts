@@ -1,5 +1,5 @@
 import { call } from "@decky/api";
-import type { CompatAppliedState, Config, CurvesState, DisplayOrientation, DisplayOrientationState, FanCurve, FanSettings, HomePowerState, InstalledGame, PowerConfig, RgbConfig, Tweaks } from "./types";
+import type { CompatAppliedState, Config, CurvesState, DisplayOrientation, DisplayOrientationState, FanCurve, FanSettings, HomePowerState, InstalledGame, PowerConfig, RgbConfig, Tweaks, UpdatesState, UpdateItem, LocalUpdate, UpdateProgress } from "./types";
 
 export const getConfig = () => call<[], Config>("get_config");
 export const getInstalledGames = () => call<[], InstalledGame[]>("get_installed_games");
@@ -16,6 +16,12 @@ export const saveCompatApplied = (appids: string[], protonDefault: string | null
   compatAppliedSaveChain = request;
   return request;
 };
+export const getUpdates = () => call<[], UpdatesState>("get_updates");
+export const refreshUpdates = () => call<[], UpdatesState>("refresh_updates");
+export const installUpdate = (id: string) => call<[string], UpdateItem>("install_update", id);
+export const getUpdateProgress = (id: string) => call<[string], UpdateProgress>("get_update_progress", id);
+export const getLocalUpdates = () => call<[], LocalUpdate[]>("get_local_updates");
+export const deleteLocalUpdate = (kind: LocalUpdate["kind"], id: string) => call<[string, string], { kind: string; id: string; removed: boolean }>("delete_local_update", kind, id);
 export const setSwipeGesturesEnabled = (enabled: boolean) => call<[boolean], boolean>("set_swipe_gestures_enabled", enabled);
 export const setSwipeGesturesInGameEnabled = (enabled: boolean) => call<[boolean], boolean>("set_swipe_gestures_in_game_enabled", enabled);
 export const suspendSwipeGestures = (suspended: boolean) => call<[boolean], boolean>("suspend_swipe_gestures", suspended);

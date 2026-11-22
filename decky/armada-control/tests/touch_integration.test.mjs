@@ -376,10 +376,11 @@ export const saveTweaks = async () => {};`,
   "./hooks/useDebouncedSave": `export const useDebouncedSave = () => {};`,
   "./hooks/useLocale": `export const useLocale = () => globalThis.__touchControllerLocale;`,
   "./i18n": controllerI18nUrl,
-  "./icons": `export const tabIcons = { Compatibility: {}, Power: {}, Touch: {}, Fans: {}, RGB: {}, TF: {}, Advanced: {} };`,
+  "./icons": `export const tabIcons = { Compatibility: {}, Updates: {}, Power: {}, Touch: {}, Fans: {}, RGB: {}, TF: {}, Advanced: {} };`,
   "./lib/games": `export const currentGame = () => null;`,
   "./styles": `export const styles = "";`,
   "./tabs/Compatibility": `export const Compatibility = "Compatibility";`,
+  "./tabs/Updates": `export const Updates = "Updates";`,
   "./tabs/Fans": `export const Fans = "Fans";`,
   "./tabs/Power": `export const Power = "Power";`,
   "./tabs/Settings": `export const Settings = "Settings";`,
@@ -458,17 +459,17 @@ const mountContent = (locale, config = baseConfig) => {
 // Touch sits after Power, ahead of the optional pages, TF and Advanced; every
 // previous page keeps its place and Compatibility stays the default.
 const full = tabsOf(mountContent("en"));
-assert.deepEqual(tabIds(full), ["Compatibility", "Power", "Touch", "Fans", "RGB", "TF", "Advanced"]);
+assert.deepEqual(tabIds(full), ["Compatibility", "Updates", "Power", "Touch", "Fans", "RGB", "TF", "Advanced"]);
 const bare = tabsOf(mountContent("en", { ...baseConfig, fanSupported: false, rgbSupported: false }));
-assert.deepEqual(tabIds(bare), ["Compatibility", "Power", "Touch", "TF", "Advanced"]);
+assert.deepEqual(tabIds(bare), ["Compatibility", "Updates", "Power", "Touch", "TF", "Advanced"]);
 const rgbOnly = tabsOf(mountContent("en", { ...baseConfig, fanSupported: false, rgbSupported: true }));
-assert.deepEqual(tabIds(rgbOnly), ["Compatibility", "Power", "Touch", "RGB", "TF", "Advanced"]);
+assert.deepEqual(tabIds(rgbOnly), ["Compatibility", "Updates", "Power", "Touch", "RGB", "TF", "Advanced"]);
 
 // Every page keeps the same plain, auto-height body wrapper; the Touch page no
 // longer opts into a height chain. This is element structure, not a layout
 // measurement; the real geometry is checked on the device DOM.
 const bodyClass = (tabsEl, id) => tabById(tabsEl, id).content.props.className;
-for (const id of ["Compatibility", "Power", "Touch", "Fans", "RGB", "TF", "Advanced"]) {
+for (const id of ["Compatibility", "Updates", "Power", "Touch", "Fans", "RGB", "TF", "Advanced"]) {
   assert.equal(bodyClass(full, id), "armada-control-tab-content", `${id} keeps the plain body`);
 }
 

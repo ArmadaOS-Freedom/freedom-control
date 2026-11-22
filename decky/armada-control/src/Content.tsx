@@ -17,6 +17,7 @@ import { TfLibraryContent } from "./tf/TfLibraryContent";
 import type { Locale as TfLocale } from "./tf/i18n";
 import { tfText } from "./tf/tf_i18n";
 import { TouchContent } from "./touch/TouchContent";
+import { Updates } from "./tabs/Updates";
 import type { Language as TouchLanguage } from "./touch/i18n";
 import type { Config } from "./types";
 
@@ -105,6 +106,15 @@ export function Content() {
         onShowTab={setTab}
         tabs={[
           { id: "Compatibility", title: tabIcons.Compatibility, content: tabContent(<Compatibility config={config} setConfig={setConfig} />) },
+          {
+            id: "Updates",
+            title: (
+              <span role="img" aria-label={t("updates.title")} title={t("updates.title")}>
+                {tabIcons.Updates}
+              </span>
+            ),
+            content: tabContent(<Updates config={config} setConfig={setConfig} />),
+          },
           { id: "Power", title: tabIcons.Power, content: tabContent(<Power config={config} setConfig={setConfig} />) },
           // Mounted only while its tab is active. The heartbeat and the layout
           // route are owned by the plugin lifecycle, not by this page, so

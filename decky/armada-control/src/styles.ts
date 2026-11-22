@@ -142,13 +142,115 @@ export const styles = `
       .armada-control-dialog-footer {
         display: flex;
         flex-direction: row;
-        gap: 8px;
+        align-items: stretch;
+        gap: 10px;
+        border-top: 1px solid rgba(255, 255, 255, 0.16);
+        padding-top: 12px;
+        margin-top: 12px;
       }
       .armada-control-dialog-footer > button {
         flex: 1 1 0;
         min-width: 0;
         width: auto;
         margin: 0;
+      }
+      .armada-control-dialog-divider {
+        flex: 0 0 1px;
+        align-self: stretch;
+        background: rgba(255, 255, 255, 0.24);
+      }
+      .armada-update-entry {
+        box-sizing: border-box;
+        width: 100%;
+        min-width: 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+        padding: 8px 0;
+      }
+      .armada-update-entry .PanelSectionRow,
+      .armada-update-entry [class*="PanelSectionRow"] {
+        width: 100%;
+        min-width: 0;
+      }
+      .armada-update-text {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+        align-self: stretch;
+        padding: 2px 16px 8px;
+        overflow-wrap: anywhere;
+        word-break: normal;
+      }
+      .armada-update-label {
+        min-width: 0;
+        font-size: 16px;
+        line-height: 22px;
+        font-weight: 600;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: normal;
+      }
+      .armada-update-description {
+        min-width: 0;
+        margin-top: 2px;
+        font-size: 12px;
+        line-height: 16px;
+        opacity: 0.72;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: normal;
+      }
+      .armada-update-entry [class*="PanelSectionRow"] {
+        box-sizing: border-box;
+        min-width: 0;
+        justify-content: flex-start;
+        padding-top: 4px;
+        padding-bottom: 4px;
+      }
+      .armada-update-action {
+        box-sizing: border-box;
+        width: 100%;
+        min-width: 0;
+        flex: 0 0 auto;
+      }
+      .armada-update-action > * {
+        width: 100%;
+        min-width: 0;
+        margin: 0;
+      }
+      .armada-update-actions {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        min-width: 0;
+        gap: 4px;
+      }
+      .armada-update-entry .armada-update-action > [class*="ButtonItem"] {
+        width: 100%;
+        min-width: 0;
+      }
+      .armada-update-progress {
+        display: flex;
+        flex: 1 1 180px;
+        align-items: center;
+        gap: 8px;
+        min-width: 110px;
+        font-size: 12px;
+      }
+      .armada-update-progress-track {
+        height: 6px;
+        flex: 1 1 auto;
+        min-width: 48px;
+        overflow: hidden;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.14);
+      }
+      .armada-update-progress-fill {
+        height: 100%;
+        background: #80a8ff;
+        transition: width 180ms ease;
       }
       .afc-scope .afc-graph-focusable {
         display: block;

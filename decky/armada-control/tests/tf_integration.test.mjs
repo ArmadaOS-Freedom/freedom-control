@@ -145,10 +145,11 @@ export const saveTweaks = async () => {};`,
   "./hooks/useDebouncedSave": `export const useDebouncedSave = () => {};`,
   "./hooks/useLocale": `export const useLocale = () => globalThis.__tfLocale;`,
   "./i18n": `export const t = (key) => key;`,
-  "./icons": `export const tabIcons = { Compatibility: {}, Power: {}, Touch: {}, Fans: {}, RGB: {}, TF: {}, Advanced: {} };`,
+  "./icons": `export const tabIcons = { Compatibility: {}, Updates: {}, Power: {}, Touch: {}, Fans: {}, RGB: {}, TF: {}, Advanced: {} };`,
   "./lib/games": `export const currentGame = () => null;`,
   "./styles": `export const styles = "";`,
   "./tabs/Compatibility": `export const Compatibility = "Compatibility";`,
+  "./tabs/Updates": `export const Updates = "Updates";`,
   "./tabs/Fans": `export const Fans = "Fans";`,
   "./tabs/Power": `export const Power = "Power";`,
   "./tabs/Settings": `export const Settings = "Settings";`,
@@ -231,11 +232,11 @@ const renderContent = () => {
 
 // The optional pages follow the device flags, and TF stays before Advanced.
 const full = tabsOf(mountContent("en"));
-assert.deepEqual(tabIds(full), ["Compatibility", "Power", "Touch", "Fans", "RGB", "TF", "Advanced"]);
+assert.deepEqual(tabIds(full), ["Compatibility", "Updates", "Power", "Touch", "Fans", "RGB", "TF", "Advanced"]);
 const bare = tabsOf(mountContent("en", { ...baseConfig, fanSupported: false, rgbSupported: false }));
-assert.deepEqual(tabIds(bare), ["Compatibility", "Power", "Touch", "TF", "Advanced"]);
+assert.deepEqual(tabIds(bare), ["Compatibility", "Updates", "Power", "Touch", "TF", "Advanced"]);
 const rgbOnly = tabsOf(mountContent("en", { ...baseConfig, fanSupported: false, rgbSupported: true }));
-assert.deepEqual(tabIds(rgbOnly), ["Compatibility", "Power", "Touch", "RGB", "TF", "Advanced"]);
+assert.deepEqual(tabIds(rgbOnly), ["Compatibility", "Updates", "Power", "Touch", "RGB", "TF", "Advanced"]);
 
 // A fresh default mount: Compatibility is active and the TF page is absent, so
 // no card probe or status poll can run before the tab is opened.

@@ -26,6 +26,7 @@ from armada_control.system import (
     swipe_gestures_in_game_enabled,
 )
 from armada_control.tweaks import load_compat_applied, save_compat_applied, save_tweaks
+from armada_control.updates import current as current_updates, delete_local, install as install_update, local as local_updates, progress as update_progress, refresh as refresh_updates
 from armada_control.fan_curves import get_state as get_fans_state, save_all as save_fan_curves, save_charging_pwm
 from armada_control.fan_sensors import get_current_temp
 from armada_control.home_power import HomePower
@@ -123,6 +124,24 @@ class Plugin:
 
     async def save_compat_applied(self, appids, proton_default=None):
         return await asyncio.to_thread(save_compat_applied, appids, proton_default)
+
+    async def get_updates(self):
+        return await asyncio.to_thread(current_updates)
+
+    async def refresh_updates(self):
+        return await asyncio.to_thread(refresh_updates)
+
+    async def install_update(self, update_id):
+        return await asyncio.to_thread(install_update, update_id)
+
+    async def get_update_progress(self, update_id):
+        return await asyncio.to_thread(update_progress, update_id)
+
+    async def get_local_updates(self):
+        return await asyncio.to_thread(local_updates)
+
+    async def delete_local_update(self, kind, update_id):
+        return await asyncio.to_thread(delete_local, kind, update_id)
 
     async def set_swipe_gestures_enabled(self, enabled):
         result = await asyncio.to_thread(set_swipe_gestures_enabled, enabled)
