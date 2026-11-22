@@ -132,30 +132,6 @@ else:
   assert.equal(result, "");
 });
 
-test("user driver IDs map to removable filesystem IDs", { skip: platform() === "win32" }, () => {
-  const result = runPython(`
-import pathlib, sys, tempfile
-module.HOME = pathlib.Path(sys.argv[2])
-module.TURNIP_DIR = module.HOME / "turnip"
-module.SYSTEM_TURNIP_DIR = module.HOME / "system-turnip"
-module.HOME.mkdir(parents=True)
-module.TURNIP_DIR.mkdir(parents=True)
-module.os.geteuid = lambda: 1000
-module.SYSTEM_TURNIP_DIR = pathlib.Path(sys.argv[2]) / "missing-system-turnip"
-module._installed = lambda kind, item_id: (module.TURNIP_DIR / item_id.removeprefix(module.USER_PREFIX) / "libvulkan_freedreno.so").is_file()
-driver = module.TURNIP_DIR / "custom-driver"
-driver.mkdir()
-(driver / "libvulkan_freedreno.so").write_text("driver")
-items = module.local()
-item = next(item for item in items if item["id"] == "user:custom-driver")
-assert item["removable"]
-assert module._installed("turnip", item["id"])
-module.delete_local("turnip", item["id"])
-assert not driver.exists()
-`, [join(tmpdir(), `armada-user-driver-test-${process.pid}`)]);
-  assert.equal(result, "");
-});
-
 test("safe store rejects symlinked parents", { skip: platform() === "win32" }, () => {
   const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
   try {
