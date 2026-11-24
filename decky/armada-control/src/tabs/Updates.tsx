@@ -1,11 +1,10 @@
 import { ButtonItem, DialogBody, DialogButton, DialogFooter, Field, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 import { useEffect, useRef, useState } from "react";
-import type { Dispatch, SetStateAction } from "react";
 import { deleteLocalUpdate, getConfig, getLocalUpdates, getUpdateProgress, getUpdates, installUpdate, refreshUpdates, restartGameMode, saveTweaks } from "../backend";
 import { ArmadaModalRoot } from "../components/ArmadaModalRoot";
 import { t } from "../i18n";
 import { getProtonTools, setWindowsCompatTool } from "../lib/steamCompat";
-import type { Config, LocalUpdate, UpdateItem, UpdateProgress, UpdatesState } from "../types";
+import type { Config, LocalUpdate, Tweaks, UpdateItem, UpdateProgress, UpdatesState } from "../types";
 
 function CompatRestartModal({ closeModal, name }: { closeModal?: () => void; name: string }) {
   return (
@@ -58,15 +57,14 @@ function updateSection(title: string, items: UpdateItem[], busy: string, progres
   );
 }
 
-export function Updates({ config, setConfig }: { config: Config; setConfig: Dispatch<SetStateAction<Config | null>> }) {
+export function Updates({ config, applySavedTweaks }: { config: Config; applySavedTweaks: (tweaks: Tweaks) => void }) {
   const [state, setState] = useState<UpdatesState | null>(null);
   const [local, setLocal] = useState<LocalUpdate[]>([]);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
-  const selectionRequest = useRef(0);
-  const deletionRequest = useRef(0);
+  const localActionPending = useRef(false);
   const load = async (refresh = false) => {
     setBusy(refresh ? "refresh" : "load");
     setMessage("");
@@ -86,7 +84,9 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
     }
   };
   const selectLocal = async (item: LocalUpdate) => {
-    const requestId = ++selectionRequest.current;
+    if (busy || localActionPending.current) return;
+    localActionPending.current = true;
+    setBusy(`select:${item.id}`);
     const field = item.kind === "turnip" ? "turnipDriver" : "windowsCompatTool";
     const driverId = item.id.startsWith("user:") ? item.id.slice("user:".length) : item.id;
     const driver = item.kind === "turnip" ? (driverId === "stable" ? undefined : driverId) : undefined;
@@ -94,55 +94,55 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
     const next = { ...config.tweaks, global: { ...config.tweaks.global, [field]: selectionId } };
     setMessage("");
     try {
-      await saveTweaks(next);
-      if (requestId !== selectionRequest.current) return;
-      setConfig((current) => current ? { ...current, tweaks: next } : current);
+      const saved = await saveTweaks(next);
+      applySavedTweaks(saved.tweaks);
       if (item.kind === "turnip") {
         setMessage(t("updates.driverAppliesNextLaunch", { name: item.label }));
         return;
       }
-      setWindowsCompatTool(typeof selectionId === "string" ? selectionId : undefined);
+      setWindowsCompatTool(saved.tweaks.global.windowsCompatTool || undefined);
       setMessage(t("updates.selected", { name: item.label }));
       const tools = await getProtonTools(true);
-      if (requestId === selectionRequest.current && typeof selectionId === "string" && !tools.some((tool) => tool.id === selectionId)) {
+      if (typeof selectionId === "string" && !tools.some((tool) => tool.id === selectionId)) {
         showModal(<CompatRestartModal name={item.label} />);
       }
     } catch (error) {
-      if (requestId === selectionRequest.current) setMessage(String(error));
+      setMessage(String(error));
+    } finally {
+      localActionPending.current = false;
+      setBusy("");
     }
   };
   const removeLocal = async (item: LocalUpdate) => {
-    if (!item.removable) return;
-    const requestId = ++deletionRequest.current;
-    const selectionId = selectionRequest.current;
+    if (busy || localActionPending.current || !item.removable) return;
+    localActionPending.current = true;
     setBusy(`delete:${item.id}`);
     try {
       const result = await deleteLocalUpdate(item.kind, item.id, item.installedId);
       const field = item.kind === "turnip" ? "turnipDriver" : "windowsCompatTool";
-      if (result.selectionCleared && selectionId === selectionRequest.current) {
-        const next = { ...config.tweaks, global: { ...config.tweaks.global } };
-        delete next.global[field];
+      if (result.selectionCleared) {
+        const global = { ...config.tweaks.global };
+        delete global[field];
         if (item.kind === "compatibility") setWindowsCompatTool(undefined);
-        setConfig((current) => current ? { ...current, tweaks: next } : current);
+        applySavedTweaks({ ...config.tweaks, global });
       }
       await load();
     } catch (error) {
       try {
-        const recoverySelectionId = selectionRequest.current;
         const current = await getConfig();
-        if (requestId === deletionRequest.current && recoverySelectionId === selectionRequest.current) {
-          setConfig(current);
-          setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
-        }
+        applySavedTweaks(current.tweaks);
+        setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
       } catch {
       }
       setMessage(String(error));
+    } finally {
+      localActionPending.current = false;
       setBusy("");
     }
   };
   useEffect(() => { void load(); }, []);
   useEffect(() => {
-    if (!busy || busy === "load" || busy === "refresh" || busy.startsWith("delete:")) return;
+    if (!busy || busy === "load" || busy === "refresh" || busy.startsWith("select:") || busy.startsWith("delete:")) return;
     let cancelled = false;
     const poll = async () => {
       try {

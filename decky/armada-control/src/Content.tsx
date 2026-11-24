@@ -113,7 +113,10 @@ export function Content() {
                 {tabIcons.Updates}
               </span>
             ),
-            content: tabContent(<Updates config={config} setConfig={setConfig} />),
+            content: tabContent(<Updates config={config} applySavedTweaks={(tweaks) => {
+              savedTweaksSnapshot.current = JSON.stringify(tweaks);
+              setConfig((current) => current ? { ...current, tweaks } : current);
+            }} />),
           },
           { id: "Power", title: tabIcons.Power, content: tabContent(<Power config={config} setConfig={setConfig} />) },
           // Mounted only while its tab is active. The heartbeat and the layout

@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { platform } from "node:os";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
 
 const source = readFileSync(new URL("../py_modules/armada_control/updates.py", import.meta.url), "utf8");
 const python = String.raw`
@@ -26,6 +28,88 @@ const runPython = (code, args = []) => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return result.stdout;
 };
+
+test("local update buttons keep selection and deletion recovery from overlapping", async () => {
+  const tabSource = readFileSync(new URL("../src/tabs/Updates.tsx", import.meta.url), "utf8");
+  const compiled = ts.transpileModule(tabSource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText;
+  const drivers = ["driver-a", "driver-b"].map((id) => ({
+    id: `user:${id}`, kind: "turnip", label: id, removable: true,
+  }));
+  const hooks = [{ ok: true, updates: [] }, drivers];
+  let hookIndex = 0;
+  let config = { tweaks: { global: { turnipDriver: "driver-a" }, games: {} } };
+  let savedTweaks;
+  let removalAttempt;
+  let finishSave;
+  let finishRecovery;
+  const savePending = new Promise((resolve) => { finishSave = resolve; });
+  const recoveryPending = new Promise((resolve) => { finishRecovery = resolve; });
+  const jsx = (type, props) => ({ type, props });
+  const modules = {
+    "@decky/ui": { ButtonItem: "ButtonItem", Field: "Field", PanelSection: "PanelSection", PanelSectionRow: "PanelSectionRow" },
+    react: {
+      useState(initial) {
+        const index = hookIndex++;
+        if (!(index in hooks)) hooks[index] = initial;
+        return [hooks[index], (value) => { hooks[index] = value; }];
+      },
+      useRef(initial) {
+        const index = hookIndex++;
+        hooks[index] ??= { current: initial };
+        return hooks[index];
+      },
+      useEffect() {},
+    },
+    "react/jsx-runtime": { jsx, jsxs: jsx },
+    "../backend": {
+      saveTweaks(tweaks) { savedTweaks = tweaks; return savePending; },
+      async deleteLocalUpdate(_kind, id) { removalAttempt = id; throw new Error("Could not remove driver"); },
+      getConfig() { return recoveryPending; },
+    },
+    "../components/ArmadaModalRoot": {},
+    "../i18n": { t: (key) => key },
+    "../lib/steamCompat": { setWindowsCompatTool() {} },
+  };
+  const exports = {};
+  runInNewContext(compiled, { exports, require: (name) => modules[name] });
+  const renderButtons = () => {
+    hookIndex = 0;
+    const buttons = [];
+    const visit = (node) => {
+      if (Array.isArray(node)) node.forEach(visit);
+      else if (node?.props) {
+        if (node.type === "ButtonItem") buttons.push(node.props);
+        visit(node.props.children);
+      }
+    };
+    visit(exports.Updates({ config, applySavedTweaks: (tweaks) => { config = { tweaks }; } }));
+    return buttons;
+  };
+  const initial = renderButtons();
+  initial.find((button) => button.children === "updates.select").onClick();
+  assert.equal(savedTweaks.global.turnipDriver, "driver-b");
+  assert.ok(renderButtons().every((button) => button.disabled));
+  initial.find((button) => button.children === "updates.remove").onClick();
+  assert.equal(removalAttempt, undefined);
+
+  finishSave({ tweaks: savedTweaks });
+  await new Promise(setImmediate);
+  assert.equal(config.tweaks.global.turnipDriver, "driver-b");
+
+  const afterSave = renderButtons();
+  afterSave.find((button) => button.children === "updates.remove").onClick();
+  await new Promise(setImmediate);
+  assert.equal(removalAttempt, "user:driver-a");
+  assert.ok(renderButtons().every((button) => button.disabled));
+  afterSave.find((button) => button.children === "updates.select").onClick();
+  assert.equal(savedTweaks.global.turnipDriver, "driver-b");
+  finishRecovery({ tweaks: savedTweaks });
+  await new Promise(setImmediate);
+  assert.equal(config.tweaks.global.turnipDriver, "driver-b");
+  assert.ok(renderButtons().some((button) => !button.disabled));
+});
 
 test("update contract exposes only Armada Linux package kinds", () => {
   assert.match(source, /kind not in \("turnip", "compatibility"\)/);
