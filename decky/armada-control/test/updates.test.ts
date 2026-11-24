@@ -83,7 +83,7 @@ metadata.write_text("[]")
 assert module._compat_catalog_id(compat) == "Proton-A"
 assert module._compat_tool_id(compat) == "Steam-Key"
 rows = [item for item in module.local() if item["kind"] == "compatibility"]
-assert rows == [{"id": "Proton-A", "kind": "compatibility", "label": "Custom", "version": "", "removable": True, "installedId": "Proton-A", "selectionId": "Steam-Key"}], rows
+assert rows == [{"id": "Proton-A", "kind": "compatibility", "label": "Custom", "version": "", "removable": True, "installedId": "Proton-A", "selectionId": "Steam-Key", "storeId": "user"}], rows
 `, [temp]);
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -108,6 +108,35 @@ for name in ("Proton-A", "Proton-B"):
     (package / ".armada-control-update.json").write_text(json.dumps({"catalogId": "shared-catalog"}))
 items = [item for item in module.local() if item["kind"] == "compatibility"]
 assert [item["installedId"] for item in items] == ["Proton-A", "Proton-B"], items
+`, [temp]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("compatibility installs require a runtime manifest and list dual manifests once", () => {
+  const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
+  try {
+    runPython(`
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[2])
+module.HOME = root / "home"
+module.COMPAT_DIR = module.HOME / ".local/share/Steam/compatibilitytools.d"
+module.SYSTEM_COMPAT_DIR = root / "system-compat"
+module.TURNIP_DIR = module.HOME / "missing-turnip"
+module.SYSTEM_TURNIP_DIR = root / "missing-system-turnip"
+empty = module.COMPAT_DIR / "Empty-Package"
+empty.mkdir(parents=True)
+(empty / ".armada-control-update.json").write_text(json.dumps({"catalogId": "empty-catalog"}))
+assert not module._installed("compatibility", "empty-catalog")
+valid = module.COMPAT_DIR / "Valid-Package"
+valid.mkdir()
+(valid / "compatibilitytool.vdf").write_text('"compat_tools" { "Valid-Key" {} }')
+(valid / "toolmanifest.vdf").write_text('"compat_tools" { "Valid-Key" {} }')
+(valid / ".armada-control-update.json").write_text(json.dumps({"catalogId": "valid-catalog"}))
+items = [item for item in module.local() if item["kind"] == "compatibility"]
+assert [item["installedId"] for item in items] == ["Valid-Package"], items
+assert module._installed("compatibility", "valid-catalog")
 `, [temp]);
   } finally {
     rmSync(temp, { recursive: true, force: true });

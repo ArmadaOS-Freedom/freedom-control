@@ -1,7 +1,7 @@
 import { ButtonItem, DialogBody, DialogButton, DialogFooter, Field, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { deleteLocalUpdate, getLocalUpdates, getUpdateProgress, getUpdates, installUpdate, refreshUpdates, restartGameMode, saveTweaks } from "../backend";
+import { deleteLocalUpdate, getConfig, getLocalUpdates, getUpdateProgress, getUpdates, installUpdate, refreshUpdates, restartGameMode, saveTweaks } from "../backend";
 import { ArmadaModalRoot } from "../components/ArmadaModalRoot";
 import { t } from "../i18n";
 import { getProtonTools, setWindowsCompatTool } from "../lib/steamCompat";
@@ -124,6 +124,14 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
       }
       await load();
     } catch (error) {
+      if (item.kind === "compatibility") {
+        try {
+          const current = await getConfig();
+          setConfig(current);
+          setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
+        } catch {
+        }
+      }
       setMessage(String(error));
       setBusy("");
     }
@@ -198,7 +206,7 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
       {updateSection(t("updates.onlineCompat"), state.updates.filter((item) => item.kind === "compatibility"), busy, progress, (item) => { void install(item); }, t("updates.noUpdates"))}
       <PanelSection title={t("updates.localCompat")}>
         {local.filter((item) => item.kind === "compatibility").length ? local.filter((item) => item.kind === "compatibility").map((item) => (
-          <div key={`compatibility:${item.installedId || item.id}`} className="armada-update-entry">
+          <div key={`compatibility:${item.storeId || "user"}:${item.installedId || item.id}`} className="armada-update-entry">
             <PanelSectionRow>
               <UpdateText label={item.label} description={item.version || (selectedCompatId === (item.selectionId || item.installedId || item.id) ? t("updates.preferred") : "")} />
             </PanelSectionRow>

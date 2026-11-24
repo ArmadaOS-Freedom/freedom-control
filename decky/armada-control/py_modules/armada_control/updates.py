@@ -211,9 +211,8 @@ def _installed(kind, item_id):
             return True
         if root == COMPAT_DIR and root.is_dir():
             for package_dir in root.iterdir():
-                manifest = package_dir / ".armada-control-update.json"
                 try:
-                    if _compat_catalog_id(package_dir) == item_id:
+                    if _valid_install(package_dir, "compatibility") and _compat_catalog_id(package_dir) == item_id:
                         return True
                 except (OSError, ValueError):
                     continue
@@ -266,11 +265,16 @@ def local():
         item_id = library.parent.name
         if not any(item["id"] == item_id for item in items) and _installed("turnip", item_id):
             items.append(_local_item("turnip", USER_PREFIX + item_id, item_id, "", item_id != "stable"))
+    seen_compat_installations = set()
     for compat_root in (SYSTEM_COMPAT_DIR, COMPAT_DIR):
         if compat_root.is_dir():
             for marker in sorted(compat_root.glob("*/*.vdf")):
                 if marker.name not in ("compatibilitytool.vdf", "toolmanifest.vdf"):
                     continue
+                installation_identity = (compat_root, marker.parent.name)
+                if installation_identity in seen_compat_installations:
+                    continue
+                seen_compat_installations.add(installation_identity)
                 item_id = marker.parent.name
                 if not _safe_id(item_id):
                     continue
@@ -288,6 +292,7 @@ def local():
                 item = _local_item("compatibility", catalog_id, label, version, compat_root == COMPAT_DIR)
                 item["installedId"] = item_id
                 item["selectionId"] = _compat_tool_id(marker.parent)
+                item["storeId"] = "user" if compat_root == COMPAT_DIR else "system"
                 items.append(item)
     return items
 

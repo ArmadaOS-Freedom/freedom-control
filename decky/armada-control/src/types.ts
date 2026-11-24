@@ -89,6 +89,7 @@ export interface LocalUpdate {
   selectionId?: string;
   selectionCleared?: boolean;
   installedId?: string;
+  storeId?: "system" | "user";
 }
 
 export interface UpdateProgress {
