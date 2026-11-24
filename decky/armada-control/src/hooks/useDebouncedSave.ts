@@ -20,13 +20,16 @@ export function useDebouncedSave<Field extends SaveField>(options: DebouncedSave
   const value = config?.[field];
   const timer = useRef<number | undefined>(undefined);
   const pendingSave = useRef(Promise.resolve<unknown>(undefined));
+  const snapshotConfirmed = useRef(true);
   const persist = (data: Config[Field]) => {
     const serialized = JSON.stringify(data);
     const request = pendingSave.current.catch(() => {}).then(async () => {
-      if (serialized === snapshot.current) return data;
+      if (snapshotConfirmed.current && serialized === snapshot.current) return data;
+      snapshotConfirmed.current = false;
       const next = await save(data);
       const saved = next[field];
       snapshot.current = JSON.stringify(saved);
+      snapshotConfirmed.current = true;
       setConfig((stored) => {
         if (!stored) return next;
         if (JSON.stringify(stored[field]) !== serialized) return stored;

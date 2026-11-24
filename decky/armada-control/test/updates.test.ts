@@ -137,7 +137,7 @@ test("local update buttons keep selection and deletion recovery from overlapping
   assert.equal(inventoryReads, 2);
 });
 
-test("flushing tweaks cancels the debounce and waits for submitted writes", async () => {
+test("flushing tweaks waits for submitted writes and restores an unconfirmed snapshot", async () => {
   const hookSource = readFileSync(new URL("../src/hooks/useDebouncedSave.ts", import.meta.url), "utf8");
   const compiled = ts.transpileModule(hookSource, {
     compilerOptions: { module: ts.ModuleKind.CommonJS },
@@ -169,13 +169,17 @@ test("flushing tweaks cancels the debounce and waits for submitted writes", asyn
   });
   const first = { global: { turnipDriver: "driver-a", gamescopeFps: 30 }, games: {} };
   const latest = { global: { ...first.global, gamescopeFps: 60 }, games: {} };
+  const unconfirmed = { global: { ...first.global, gamescopeFps: 90 }, games: {} };
   const snapshot = { current: JSON.stringify({ global: {}, games: {} }) };
   const writes = [];
+  let persisted;
   let finishFirstWrite;
   const firstWrite = new Promise((resolve) => { finishFirstWrite = resolve; });
   const save = async (tweaks) => {
     writes.push(tweaks);
     if (writes.length === 1) await firstWrite;
+    persisted = tweaks;
+    if (tweaks === unconfirmed) throw new Error("Could not read the saved configuration");
     return { tweaks };
   };
   const render = (tweaks, paused = false) => {
@@ -201,6 +205,13 @@ test("flushing tweaks cancels the debounce and waits for submitted writes", asyn
   assert.equal(await beforeDelete, latest);
   assert.deepEqual(writes, [first, latest]);
   assert.equal(timers.size, 0);
+
+  const rejected = flush(unconfirmed);
+  const restored = flush(latest);
+  await assert.rejects(rejected, /Could not read the saved configuration/);
+  assert.equal(await restored, latest);
+  assert.equal(persisted, latest);
+  assert.deepEqual(writes, [first, latest, unconfirmed, latest]);
 });
 
 test("update contract exposes only Armada Linux package kinds", () => {
