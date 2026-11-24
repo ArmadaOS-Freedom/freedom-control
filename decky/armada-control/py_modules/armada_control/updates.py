@@ -609,6 +609,8 @@ def _validate_package_links(source):
             path = pathlib.Path(directory) / name
             if not path.is_symlink():
                 continue
+            if os.path.isabs(os.readlink(path)):
+                raise UpdateError("compatibility package contains an absolute link")
             resolved = path.resolve()
             if not resolved.is_relative_to(root):
                 raise UpdateError("compatibility package contains a link outside its installed directory")

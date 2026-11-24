@@ -90,6 +90,54 @@ assert rows == [{"id": "Proton-A", "kind": "compatibility", "label": "Custom", "
   }
 });
 
+test("compatibility listing preserves duplicate catalog entries by installation", () => {
+  const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
+  try {
+    runPython(`
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[2])
+module.HOME = root / "home"
+module.TURNIP_DIR = module.HOME / "missing-turnip"
+module.SYSTEM_TURNIP_DIR = root / "missing-system-turnip"
+module.SYSTEM_COMPAT_DIR = root / "missing-system-compat"
+module.COMPAT_DIR = module.HOME / ".local/share/Steam/compatibilitytools.d"
+for name in ("Proton-A", "Proton-B"):
+    package = module.COMPAT_DIR / name
+    package.mkdir(parents=True)
+    (package / "compatibilitytool.vdf").write_text('"compat_tools" { "Shared-Steam-Key" { "display_name" "Shared" } }')
+    (package / ".armada-control-update.json").write_text(json.dumps({"catalogId": "shared-catalog"}))
+items = [item for item in module.local() if item["kind"] == "compatibility"]
+assert [item["installedId"] for item in items] == ["Proton-A", "Proton-B"], items
+`, [temp]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("compatibility publication rejects links outside its installed subtree", { skip: platform() === "win32" }, () => {
+  const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
+  try {
+    runPython(`
+import pathlib, sys
+root = pathlib.Path(sys.argv[2])
+package = root / "unpacked" / "Proton"
+package.mkdir(parents=True)
+(package / "compatibilitytool.vdf").write_text("manifest")
+(root / "unpacked" / "Sibling").mkdir()
+(root / "unpacked" / "Sibling" / "outside").write_text("outside")
+(package / "escape").symlink_to(root / "unpacked" / "Sibling" / "outside")
+try:
+    module._validate_package_links(package)
+except module.UpdateError:
+    pass
+else:
+    raise AssertionError("link escaping the installed package was accepted")
+`, [temp]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("local update management follows Armada system and user component paths", () => {
   assert.match(source, /\/usr\/share\/armada\/turnip/);
   assert.match(source, /\.local\/share\/armada\/turnip/);
@@ -165,7 +213,7 @@ else:
 test("zip extraction rejects targets that resolve to the extraction root", () => {
   const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
   try {
-  const result = runPython(`
+    const result = runPython(`
 import pathlib, sys, zipfile
 archive, destination = sys.argv[2:]
 with zipfile.ZipFile(archive, "w") as bundle:
@@ -176,8 +224,8 @@ except module.UpdateError:
     pass
 else:
     raise AssertionError("zip extraction root accepted as a file")
-`, [join(temp, "archive.zip"), join(temp, "out")]);
-  assert.equal(result, "");
+    `, [join(temp, "archive.zip"), join(temp, "out")]);
+    assert.equal(result, "");
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
