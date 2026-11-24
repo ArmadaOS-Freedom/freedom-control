@@ -97,6 +97,8 @@ export const zhCN = {
   "settings.gameModeOrientationLeft": "向左旋转 90°",
   "settings.gameModeOrientationRight": "向右旋转 90°",
   "settings.gameModeOrientationUpsidedown": "旋转 180°",
+  "settings.gameModeOrientationAuto": "自动（随设备旋转）",
+  "settings.gameModeOrientationAutoApplied": "已立即生效，无需重启游戏模式。",
   "settings.gameModeOrientationError": "无法更改游戏模式显示方向",
   "settings.gameModeOrientationLoadError": "无法读取游戏模式显示方向",
   "settings.gameModeOrientationRestart": "已保存。点击“应用方向”后生效；仅重启 Steam 客户端不会应用显示方向。",

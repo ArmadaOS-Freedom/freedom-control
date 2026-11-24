@@ -95,6 +95,8 @@ export const en = {
   "settings.gameModeOrientationLeft": "Rotate left 90°",
   "settings.gameModeOrientationRight": "Rotate right 90°",
   "settings.gameModeOrientationUpsidedown": "Rotate 180°",
+  "settings.gameModeOrientationAuto": "Automatic (follow the device)",
+  "settings.gameModeOrientationAutoApplied": "Applied now; no Game Mode restart is needed.",
   "settings.gameModeOrientationError": "Could not change the Game Mode display orientation",
   "settings.gameModeOrientationLoadError": "Could not read the Game Mode display orientation",
   "settings.gameModeOrientationRestart": "Saved. Select “Apply Orientation” to take effect; restarting only the Steam client will not apply the display orientation.",

@@ -10,10 +10,13 @@ from .privileged import call
 # Panel axes: every value is relative to the panel's own orientation, so
 # "normal" is never translated into landscape or portrait here.
 ORIENTATIONS = ("normal", "left", "right", "upsidedown")
+# Game Mode follows the accelerometer; the helper accepts it only on devices
+# that report autoSupported.
+AUTO = "auto"
 UNSET = ""
 
 # The empty string is the accepted "no override" request value.
-ALLOWED = ORIENTATIONS + (UNSET,)
+ALLOWED = ORIENTATIONS + (AUTO, UNSET)
 
 
 def _state(result):
@@ -29,10 +32,15 @@ def _state(result):
     default = result.get("defaultOrientation")
     if not isinstance(default, str) or default not in ORIENTATIONS:
         raise ValueError("helper returned an invalid default orientation: %r" % (default,))
+    # Helpers from before automatic rotation do not report it: not offered.
+    auto_supported = result.get("autoSupported", False)
+    if not isinstance(auto_supported, bool):
+        raise ValueError("helper returned a non-boolean autoSupported flag: %r" % (auto_supported,))
     return {
         "supported": supported,
         "orientation": orientation,
         "defaultOrientation": default,
+        "autoSupported": auto_supported,
     }
 
 

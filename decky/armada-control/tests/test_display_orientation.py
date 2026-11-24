@@ -9,8 +9,9 @@ from armada_control import display_orientation
 from armada_control.display_orientation import get_display_orientation, set_display_orientation
 
 
-def state(orientation="", supported=True, default="normal"):
-    return {"supported": supported, "orientation": orientation, "defaultOrientation": default}
+def state(orientation="", supported=True, default="normal", auto_supported=False):
+    return {"supported": supported, "orientation": orientation, "defaultOrientation": default,
+            "autoSupported": auto_supported}
 
 
 class FakeHelper:
@@ -91,6 +92,25 @@ class GetTests(DisplayOrientationTest):
                 with self.assertRaises(ValueError):
                     get_display_orientation()
 
+    def test_auto_passes_through_with_its_capability(self):
+        self.build([state("auto", auto_supported=True)])
+
+        self.assertEqual(get_display_orientation(), state("auto", auto_supported=True))
+
+    def test_helper_without_auto_capability_reports_it_off(self):
+        legacy = {"supported": True, "orientation": "left", "defaultOrientation": "normal"}
+        self.build([legacy])
+
+        self.assertEqual(get_display_orientation(), state("left"))
+
+    def test_auto_capability_must_be_a_real_boolean(self):
+        for value in (1, "yes", None, "true"):
+            with self.subTest(auto_supported=value):
+                self.build([state("", auto_supported=value)])
+
+                with self.assertRaises(ValueError):
+                    get_display_orientation()
+
     def test_supported_false_is_kept(self):
         self.build([state("", supported=False)])
 
@@ -124,7 +144,7 @@ class GetTests(DisplayOrientationTest):
 
 class SetTests(DisplayOrientationTest):
     def test_each_accepted_value_is_forwarded_and_returned(self):
-        for value in ("normal", "left", "right", "upsidedown", ""):
+        for value in ("normal", "left", "right", "upsidedown", "auto", ""):
             with self.subTest(orientation=value):
                 helper = self.build([state(value)])
 
@@ -134,7 +154,8 @@ class SetTests(DisplayOrientationTest):
                 self.assertEqual(result, state(value))
 
     def test_unsupported_strings_are_refused_without_calling(self):
-        for value in ("landscape", "Normal", " normal", "normal ", "left90", "up-side-down"):
+        for value in ("landscape", "Normal", " normal", "normal ", "left90", "up-side-down",
+                      "Auto", "auto "):
             with self.subTest(orientation=value):
                 helper = self.build()
 
