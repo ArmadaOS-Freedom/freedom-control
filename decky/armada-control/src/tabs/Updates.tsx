@@ -169,16 +169,25 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
   const selectedCompatId = config.tweaks.global.windowsCompatTool || "";
   const selectedDriver = local.find((item) => item.kind === "turnip" && item.id.replace(/^user:/, "") === selectedDriverId);
   const selectedCompat = local.find((item) => item.kind === "compatibility" && (item.selectionId || item.installedId || item.id) === selectedCompatId);
-  if (!state) return <PanelSection title={t("updates.title")}><Field label={loading ? t("updates.loading") : t("updates.unavailable")} description={message || (loading ? "" : t("updates.checkFailed"))} /><div className="armada-update-check-row"><PanelSectionRow><div className="armada-update-action"><ButtonItem layout="below" disabled={!!busy} onClick={() => { void load(true); }}>{busy === "refresh" ? t("updates.checking") : t("updates.check")}</ButtonItem></div></PanelSectionRow></div></PanelSection>;
+  if (!state) return (
+    <PanelSection title={t("updates.title")}>
+      <Field label={loading ? t("updates.loading") : t("updates.unavailable")} description={message || (loading ? "" : t("updates.checkFailed"))} />
+      <PanelSectionRow>
+        <ButtonItem layout="below" childrenContainerWidth="max" disabled={!!busy} onClick={() => { void load(true); }}>
+          {busy === "refresh" ? t("updates.checking") : t("updates.check")}
+        </ButtonItem>
+      </PanelSectionRow>
+    </PanelSection>
+  );
   return (
     <>
       <PanelSection title={t("updates.title")}>
         <Field description={t("updates.description")} />
-        <div className="armada-update-check-row">
-          <PanelSectionRow>
-            <div className="armada-update-action"><ButtonItem layout="below" disabled={!!busy} onClick={() => { void load(true); }}>{busy === "refresh" ? t("updates.checking") : t("updates.check")}</ButtonItem></div>
-          </PanelSectionRow>
-        </div>
+        <PanelSectionRow>
+          <ButtonItem layout="below" childrenContainerWidth="max" disabled={!!busy} onClick={() => { void load(true); }}>
+            {busy === "refresh" ? t("updates.checking") : t("updates.check")}
+          </ButtonItem>
+        </PanelSectionRow>
         {!state.ok ? <Field label={t("updates.unavailable")} description={state.error || t("updates.checkFailed")} /> : null}
         {message ? <Field label={t("common.status")} description={message} /> : null}
       </PanelSection>
