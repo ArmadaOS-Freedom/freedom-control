@@ -66,6 +66,7 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
   const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
   const selectionRequest = useRef(0);
+  const deletionRequest = useRef(0);
   const load = async (refresh = false) => {
     setBusy(refresh ? "refresh" : "load");
     setMessage("");
@@ -112,12 +113,13 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
   };
   const removeLocal = async (item: LocalUpdate) => {
     if (!item.removable) return;
-    const requestId = ++selectionRequest.current;
+    const requestId = ++deletionRequest.current;
+    const selectionId = selectionRequest.current;
     setBusy(`delete:${item.id}`);
     try {
       const result = await deleteLocalUpdate(item.kind, item.id, item.installedId);
       const field = item.kind === "turnip" ? "turnipDriver" : "windowsCompatTool";
-      if (result.selectionCleared) {
+      if (result.selectionCleared && selectionId === selectionRequest.current) {
         const next = { ...config.tweaks, global: { ...config.tweaks.global } };
         delete next.global[field];
         if (item.kind === "compatibility") setWindowsCompatTool(undefined);
@@ -125,15 +127,14 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
       }
       await load();
     } catch (error) {
-      if (item.kind === "compatibility") {
-        try {
-          const current = await getConfig();
-          if (requestId === selectionRequest.current) {
-            setConfig(current);
-            setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
-          }
-        } catch {
+      try {
+        const recoverySelectionId = selectionRequest.current;
+        const current = await getConfig();
+        if (requestId === deletionRequest.current && recoverySelectionId === selectionRequest.current) {
+          setConfig(current);
+          setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
         }
+      } catch {
       }
       setMessage(String(error));
       setBusy("");
