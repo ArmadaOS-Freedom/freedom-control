@@ -112,6 +112,7 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
   };
   const removeLocal = async (item: LocalUpdate) => {
     if (!item.removable) return;
+    const requestId = ++selectionRequest.current;
     setBusy(`delete:${item.id}`);
     try {
       const result = await deleteLocalUpdate(item.kind, item.id, item.installedId);
@@ -127,8 +128,10 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
       if (item.kind === "compatibility") {
         try {
           const current = await getConfig();
-          setConfig(current);
-          setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
+          if (requestId === selectionRequest.current) {
+            setConfig(current);
+            setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
+          }
         } catch {
         }
       }
