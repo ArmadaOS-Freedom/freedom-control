@@ -138,6 +138,8 @@ export const ptBR = {
   "settings.gameModeOrientationLeft": "Girar 90° para a esquerda",
   "settings.gameModeOrientationRight": "Girar 90° para a direita",
   "settings.gameModeOrientationUpsidedown": "Girar 180°",
+  "settings.gameModeOrientationAuto": "Automática (seguir o dispositivo)",
+  "settings.gameModeOrientationAutoApplied": "Aplicado agora; não é preciso reiniciar o modo jogo.",
   "settings.gameModeOrientationError": "Não foi possível alterar a orientação de exibição do modo jogo",
   "settings.gameModeOrientationLoadError": "Não foi possível ler a orientação de exibição do modo jogo",
   "settings.gameModeOrientationRestart": "Salvo. Selecione “Aplicar orientação” para aplicar; reiniciar apenas o cliente Steam não aplica a orientação de exibição.",

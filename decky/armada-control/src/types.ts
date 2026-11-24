@@ -138,11 +138,16 @@ export interface HomePowerState {
 // reports natively, so every orientation is relative to that.
 export type DisplayOrientation = "normal" | "left" | "right" | "upsidedown";
 
+// "auto" follows the accelerometer in Game Mode (only where autoSupported).
+export type DisplayOrientationSetting = DisplayOrientation | "auto";
+
 export interface DisplayOrientationState {
   supported: boolean;
   // Empty means the Game Mode override is off.
-  orientation: DisplayOrientation | "";
+  orientation: DisplayOrientationSetting | "";
   defaultOrientation: DisplayOrientation;
+  // Whether this device offers "auto"; older helpers do not report it.
+  autoSupported: boolean;
 }
 
 export interface CalibrationState {
