@@ -37,11 +37,16 @@ test("local update buttons keep selection and deletion recovery from overlapping
   const drivers = ["driver-a", "driver-b"].map((id) => ({
     id: `user:${id}`, kind: "turnip", label: id, removable: true,
   }));
-  const hooks = [{ ok: true, updates: [] }, drivers];
+  const onlineDriver = { id: "driver-c", kind: "turnip", label: "driver-c", installed: false };
+  const catalog = { ok: true, updates: [onlineDriver] };
+  const hooks = [catalog, drivers];
   let hookIndex = 0;
   let config = { tweaks: { global: { turnipDriver: "driver-a" }, games: {} } };
   let savedTweaks;
   let removalAttempt;
+  let failRemoval = true;
+  let installedId;
+  let inventoryReads = 0;
   let finishSave;
   let finishRecovery;
   const savePending = new Promise((resolve) => { finishSave = resolve; });
@@ -65,8 +70,15 @@ test("local update buttons keep selection and deletion recovery from overlapping
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "../backend": {
       saveTweaks(tweaks) { savedTweaks = tweaks; return savePending; },
-      async deleteLocalUpdate(_kind, id) { removalAttempt = id; throw new Error("Could not remove driver"); },
+      async deleteLocalUpdate(_kind, id) {
+        removalAttempt = id;
+        if (failRemoval) throw new Error("Could not remove driver");
+        return { selectionCleared: false, removed: true };
+      },
       getConfig() { return recoveryPending; },
+      async installUpdate(id) { installedId = id; return onlineDriver; },
+      async getUpdates() { return catalog; },
+      async getLocalUpdates() { return drivers; },
     },
     "../components/ArmadaModalRoot": {},
     "../i18n": { t: (key) => key },
@@ -84,7 +96,12 @@ test("local update buttons keep selection and deletion recovery from overlapping
         visit(node.props.children);
       }
     };
-    visit(exports.Updates({ config, applySavedTweaks: (tweaks) => { config = { tweaks }; } }));
+    visit(exports.Updates({
+      config,
+      applySavedTweaks: (tweaks) => { config = { tweaks }; },
+      withSavedTweaks: (action) => action(config.tweaks),
+      refreshDriverInventory: async () => { inventoryReads += 1; },
+    }));
     return buttons;
   };
   const initial = renderButtons();
@@ -109,6 +126,81 @@ test("local update buttons keep selection and deletion recovery from overlapping
   await new Promise(setImmediate);
   assert.equal(config.tweaks.global.turnipDriver, "driver-b");
   assert.ok(renderButtons().some((button) => !button.disabled));
+
+  failRemoval = false;
+  renderButtons().find((button) => button.children === "updates.remove").onClick();
+  await new Promise(setImmediate);
+  assert.equal(inventoryReads, 1);
+  renderButtons().find((button) => button.children === "updates.get").onClick();
+  await new Promise(setImmediate);
+  assert.equal(installedId, "driver-c");
+  assert.equal(inventoryReads, 2);
+});
+
+test("flushing tweaks cancels the debounce and waits for submitted writes", async () => {
+  const hookSource = readFileSync(new URL("../src/hooks/useDebouncedSave.ts", import.meta.url), "utf8");
+  const compiled = ts.transpileModule(hookSource, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const hooks = [];
+  let hookIndex = 0;
+  let previousDeps;
+  let cleanup;
+  const timers = new Map();
+  let nextTimer = 0;
+  const react = {
+    useRef(initial) {
+      const index = hookIndex++;
+      hooks[index] ??= { current: initial };
+      return hooks[index];
+    },
+    useEffect(effect, deps) {
+      if (previousDeps && deps.every((value, index) => value === previousDeps[index])) return;
+      cleanup?.();
+      previousDeps = deps;
+      cleanup = effect();
+    },
+  };
+  const exports = {};
+  runInNewContext(compiled, {
+    exports,
+    require: () => react,
+    window: { setTimeout: (callback) => { timers.set(++nextTimer, callback); return nextTimer; }, clearTimeout: (id) => timers.delete(id) },
+  });
+  const first = { global: { turnipDriver: "driver-a", gamescopeFps: 30 }, games: {} };
+  const latest = { global: { ...first.global, gamescopeFps: 60 }, games: {} };
+  const snapshot = { current: JSON.stringify({ global: {}, games: {} }) };
+  const writes = [];
+  let finishFirstWrite;
+  const firstWrite = new Promise((resolve) => { finishFirstWrite = resolve; });
+  const save = async (tweaks) => {
+    writes.push(tweaks);
+    if (writes.length === 1) await firstWrite;
+    return { tweaks };
+  };
+  const render = (tweaks, paused = false) => {
+    hookIndex = 0;
+    return exports.useDebouncedSave({ config: { tweaks }, field: "tweaks", snapshot, save, setConfig() {}, paused });
+  };
+  render(first);
+  const submit = timers.get(nextTimer);
+  timers.delete(nextTimer);
+  submit();
+  await new Promise(setImmediate);
+  assert.deepEqual(writes, [first]);
+
+  const flush = render(latest);
+  assert.equal(timers.size, 1);
+  const beforeDelete = flush(latest);
+  assert.equal(timers.size, 0);
+  render(latest, true);
+  await new Promise(setImmediate);
+  assert.deepEqual(writes, [first]);
+
+  finishFirstWrite();
+  assert.equal(await beforeDelete, latest);
+  assert.deepEqual(writes, [first, latest]);
+  assert.equal(timers.size, 0);
 });
 
 test("update contract exposes only Armada Linux package kinds", () => {

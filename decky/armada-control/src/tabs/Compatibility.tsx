@@ -11,7 +11,7 @@ import {
 } from "@decky/ui";
 import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { getCompatMappedAppids, reapplyPerf, restartGameMode, saveCompatApplied, saveTweaks } from "../backend";
+import { getCompatMappedAppids, reapplyPerf, restartGameMode, saveCompatApplied } from "../backend";
 import { ButtonRow, ControlRow, SelectEdit, SliderEdit, ToggleRow } from "../components/widgets";
 import { ArmadaModalRoot } from "../components/ArmadaModalRoot";
 import { getCurrentLocale, t, translateLabel } from "../i18n";
@@ -245,7 +245,11 @@ function EnvVarModal({
   );
 }
 
-export function Compatibility({ config, setConfig }: { config: Config; setConfig: Dispatch<SetStateAction<Config | null>> }) {
+export function Compatibility({ config, setConfig, flushTweaks }: {
+  config: Config;
+  setConfig: Dispatch<SetStateAction<Config | null>>;
+  flushTweaks: (tweaks: Config["tweaks"]) => Promise<Config["tweaks"]>;
+}) {
   const [resolution, setResolution] = useState("Default");
   const [defaultResolution, setDefaultResolution] = useState(getGlobalResolution);
   const [initializingResolution, setInitializingResolution] = useState(true);
@@ -712,7 +716,7 @@ export function Compatibility({ config, setConfig }: { config: Config; setConfig
     setReapplyStatus(t("common.applying"));
     try {
       // flush the debounce: the daemon re-reads the on-disk tweaks
-      await saveTweaks(config.tweaks);
+      await flushTweaks(config.tweaks);
       await reapplyPerf();
       setReapplyStatus(t("compatibility.appliedToRunningGame"));
     } catch (error) {
@@ -722,7 +726,7 @@ export function Compatibility({ config, setConfig }: { config: Config; setConfig
   const restartWithTweaks = async () => {
     setReapplyStatus(t("compatibility.restartingGameMode"));
     try {
-      await saveTweaks(tweaksRef.current);
+      await flushTweaks(tweaksRef.current);
       await restartGameMode();
     } catch (error) {
       setReapplyStatus(t("compatibility.restartError", { error: String(error) }));

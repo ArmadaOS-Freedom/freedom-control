@@ -57,7 +57,12 @@ function updateSection(title: string, items: UpdateItem[], busy: string, progres
   );
 }
 
-export function Updates({ config, applySavedTweaks }: { config: Config; applySavedTweaks: (tweaks: Tweaks) => void }) {
+export function Updates({ config, applySavedTweaks, withSavedTweaks, refreshDriverInventory }: {
+  config: Config;
+  applySavedTweaks: (tweaks: Tweaks) => void;
+  withSavedTweaks: (action: (tweaks: Tweaks) => Promise<void>) => Promise<void>;
+  refreshDriverInventory: () => Promise<void>;
+}) {
   const [state, setState] = useState<UpdatesState | null>(null);
   const [local, setLocal] = useState<LocalUpdate[]>([]);
   const [busy, setBusy] = useState("");
@@ -66,8 +71,6 @@ export function Updates({ config, applySavedTweaks }: { config: Config; applySav
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
   const localActionPending = useRef(false);
   const load = async (refresh = false) => {
-    setBusy(refresh ? "refresh" : "load");
-    setMessage("");
     try {
       const next = await (refresh ? refreshUpdates() : getUpdates());
       setState(next);
@@ -80,6 +83,15 @@ export function Updates({ config, applySavedTweaks }: { config: Config; applySav
       setMessage(String(error));
     } finally {
       setLoading(false);
+    }
+  };
+  const check = async (refresh = false) => {
+    if (localActionPending.current) return;
+    setBusy(refresh ? "refresh" : "load");
+    setMessage("");
+    try {
+      await load(refresh);
+    } finally {
       setBusy("");
     }
   };
@@ -91,16 +103,17 @@ export function Updates({ config, applySavedTweaks }: { config: Config; applySav
     const driverId = item.id.startsWith("user:") ? item.id.slice("user:".length) : item.id;
     const driver = item.kind === "turnip" ? (driverId === "stable" ? undefined : driverId) : undefined;
     const selectionId = item.kind === "compatibility" ? item.selectionId || item.installedId || item.id : driver;
-    const next = { ...config.tweaks, global: { ...config.tweaks.global, [field]: selectionId } };
     setMessage("");
     try {
-      const saved = await saveTweaks(next);
-      applySavedTweaks(saved.tweaks);
+      await withSavedTweaks(async (tweaks) => {
+        const saved = await saveTweaks({ ...tweaks, global: { ...tweaks.global, [field]: selectionId } });
+        applySavedTweaks(saved.tweaks);
+        if (item.kind === "compatibility") setWindowsCompatTool(saved.tweaks.global.windowsCompatTool || undefined);
+      });
       if (item.kind === "turnip") {
         setMessage(t("updates.driverAppliesNextLaunch", { name: item.label }));
         return;
       }
-      setWindowsCompatTool(saved.tweaks.global.windowsCompatTool || undefined);
       setMessage(t("updates.selected", { name: item.label }));
       const tools = await getProtonTools(true);
       if (typeof selectionId === "string" && !tools.some((tool) => tool.id === selectionId)) {
@@ -117,30 +130,37 @@ export function Updates({ config, applySavedTweaks }: { config: Config; applySav
     if (busy || localActionPending.current || !item.removable) return;
     localActionPending.current = true;
     setBusy(`delete:${item.id}`);
+    setMessage("");
     try {
-      const result = await deleteLocalUpdate(item.kind, item.id, item.installedId);
-      const field = item.kind === "turnip" ? "turnipDriver" : "windowsCompatTool";
-      if (result.selectionCleared) {
-        const global = { ...config.tweaks.global };
-        delete global[field];
-        if (item.kind === "compatibility") setWindowsCompatTool(undefined);
-        applySavedTweaks({ ...config.tweaks, global });
-      }
+      await withSavedTweaks(async (tweaks) => {
+        try {
+          const result = await deleteLocalUpdate(item.kind, item.id, item.installedId);
+          if (result.selectionCleared) {
+            const global = { ...tweaks.global };
+            delete global[item.kind === "turnip" ? "turnipDriver" : "windowsCompatTool"];
+            if (item.kind === "compatibility") setWindowsCompatTool(undefined);
+            applySavedTweaks({ ...tweaks, global });
+          }
+        } catch (error) {
+          try {
+            const current = await getConfig();
+            applySavedTweaks(current.tweaks);
+            setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
+          } catch {
+          }
+          throw error;
+        }
+      });
       await load();
+      if (item.kind === "turnip") await refreshDriverInventory();
     } catch (error) {
-      try {
-        const current = await getConfig();
-        applySavedTweaks(current.tweaks);
-        setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
-      } catch {
-      }
       setMessage(String(error));
     } finally {
       localActionPending.current = false;
       setBusy("");
     }
   };
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void check(); }, []);
   useEffect(() => {
     if (!busy || busy === "load" || busy === "refresh" || busy.startsWith("select:") || busy.startsWith("delete:")) return;
     let cancelled = false;
@@ -156,14 +176,17 @@ export function Updates({ config, applySavedTweaks }: { config: Config; applySav
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [busy]);
   const install = async (item: UpdateItem) => {
+    if (busy || localActionPending.current) return;
+    localActionPending.current = true;
     setBusy(item.id);
     setProgress({ id: item.id, phase: "checking", percent: 0, downloaded: 0, total: 0 });
     setMessage("");
     try {
       const installed = await installUpdate(item.id);
       setProgress({ id: item.id, phase: "complete", percent: 100, downloaded: 0, total: 0 });
-      setMessage(t("updates.installed", { name: item.label }));
       await load();
+      if (item.kind === "turnip") await refreshDriverInventory();
+      setMessage(t("updates.installed", { name: item.label }));
       if (item.kind === "compatibility") {
         const tools = await getProtonTools(true);
         const installedTool = tools.some((tool) => tool.id === (installed.selectionId || item.selectionId || installed.installedId || item.id));
@@ -173,8 +196,10 @@ export function Updates({ config, applySavedTweaks }: { config: Config; applySav
       }
     } catch (error) {
       setMessage(String(error));
-      setBusy("");
       setProgress(null);
+    } finally {
+      localActionPending.current = false;
+      setBusy("");
     }
   };
   const selectedDriverId = config.tweaks.global.turnipDriver || "stable";
@@ -185,7 +210,7 @@ export function Updates({ config, applySavedTweaks }: { config: Config; applySav
     <PanelSection title={t("updates.title")}>
       <Field label={loading ? t("updates.loading") : t("updates.unavailable")} description={message || (loading ? "" : t("updates.checkFailed"))} />
       <PanelSectionRow>
-        <ButtonItem layout="below" childrenContainerWidth="max" disabled={!!busy} onClick={() => { void load(true); }}>
+        <ButtonItem layout="below" childrenContainerWidth="max" disabled={!!busy} onClick={() => { void check(true); }}>
           {busy === "refresh" ? t("updates.checking") : t("updates.check")}
         </ButtonItem>
       </PanelSectionRow>
@@ -196,7 +221,7 @@ export function Updates({ config, applySavedTweaks }: { config: Config; applySav
       <PanelSection title={t("updates.title")}>
         <Field description={t("updates.description")} />
         <PanelSectionRow>
-          <ButtonItem layout="below" childrenContainerWidth="max" disabled={!!busy} onClick={() => { void load(true); }}>
+          <ButtonItem layout="below" childrenContainerWidth="max" disabled={!!busy} onClick={() => { void check(true); }}>
             {busy === "refresh" ? t("updates.checking") : t("updates.check")}
           </ButtonItem>
         </PanelSectionRow>

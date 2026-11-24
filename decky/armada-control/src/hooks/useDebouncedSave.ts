@@ -1,38 +1,52 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import type { MutableRefObject, Dispatch, SetStateAction } from "react";
 import type { Config } from "../types";
 
-interface DebouncedSaveOptions {
+type SaveField = "power" | "tweaks";
+
+interface DebouncedSaveOptions<Field extends SaveField> {
   config: Config | null;
-  field: "power" | "tweaks";
+  field: Field;
   snapshot: MutableRefObject<string>;
-  save: (value: any) => Promise<Config>;
+  save: (value: Config[Field]) => Promise<Config>;
   setConfig: Dispatch<SetStateAction<Config | null>>;
+  paused?: boolean;
   onError?: (error: unknown) => void;
   delay?: number;
 }
 
-export function useDebouncedSave(options: DebouncedSaveOptions) {
-  const { config, field, snapshot, save, setConfig, onError, delay = 900 } = options;
-  const value = config ? (config as any)[field] : undefined;
+export function useDebouncedSave<Field extends SaveField>(options: DebouncedSaveOptions<Field>) {
+  const { config, field, snapshot, save, setConfig, paused, onError, delay = 900 } = options;
+  const value = config?.[field];
+  const timer = useRef<number | undefined>(undefined);
+  const pendingSave = useRef(Promise.resolve<unknown>(undefined));
+  const persist = (data: Config[Field]) => {
+    const serialized = JSON.stringify(data);
+    const request = pendingSave.current.catch(() => {}).then(async () => {
+      if (serialized === snapshot.current) return data;
+      const next = await save(data);
+      const saved = next[field];
+      snapshot.current = JSON.stringify(saved);
+      setConfig((stored) => {
+        if (!stored) return next;
+        if (JSON.stringify(stored[field]) !== serialized) return stored;
+        return { ...stored, [field]: saved };
+      });
+      return saved;
+    });
+    pendingSave.current = request;
+    return request;
+  };
   useEffect(() => {
-    if (!config || !snapshot.current) return;
-    const current = JSON.stringify(value);
-    if (current === snapshot.current) return;
-    const timer = window.setTimeout(async () => {
-      try {
-        const saved = current;
-        const next = await save(value);
-        snapshot.current = JSON.stringify((next as any)[field]);
-        setConfig((stored) => {
-          if (!stored) return next;
-          if (JSON.stringify((stored as any)[field]) !== saved) return stored;
-          return { ...stored, [field]: (next as any)[field] };
-        });
-      } catch (error) {
-        onError?.(error);
-      }
+    if (!value || !snapshot.current || paused) return;
+    const scheduled = window.setTimeout(() => {
+      void persist(value).catch((error) => onError?.(error));
     }, delay);
-    return () => window.clearTimeout(timer);
-  }, [value]);
+    timer.current = scheduled;
+    return () => window.clearTimeout(scheduled);
+  }, [value, paused]);
+  return (data: Config[Field]) => {
+    window.clearTimeout(timer.current);
+    return persist(data);
+  };
 }
