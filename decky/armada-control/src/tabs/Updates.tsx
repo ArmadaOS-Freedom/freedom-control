@@ -1,5 +1,5 @@
 import { ButtonItem, DialogBody, DialogButton, DialogFooter, Field, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { deleteLocalUpdate, getLocalUpdates, getUpdateProgress, getUpdates, installUpdate, refreshUpdates, restartGameMode, saveTweaks } from "../backend";
 import { ArmadaModalRoot } from "../components/ArmadaModalRoot";
@@ -65,6 +65,7 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
+  const selectionRequest = useRef(0);
   const load = async (refresh = false) => {
     setBusy(refresh ? "refresh" : "load");
     setMessage("");
@@ -84,44 +85,41 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
     }
   };
   const selectLocal = async (item: LocalUpdate) => {
+    const requestId = ++selectionRequest.current;
     const field = item.kind === "turnip" ? "turnipDriver" : "windowsCompatTool";
     const driverId = item.id.startsWith("user:") ? item.id.slice("user:".length) : item.id;
     const driver = item.kind === "turnip" ? (driverId === "stable" ? undefined : driverId) : undefined;
-    const selectionId = item.kind === "compatibility" ? item.installedId || item.id : driver;
+    const selectionId = item.kind === "compatibility" ? item.selectionId || item.installedId || item.id : driver;
     const next = { ...config.tweaks, global: { ...config.tweaks.global, [field]: selectionId } };
     setMessage("");
-    if (item.kind === "turnip") {
-      try {
-        await saveTweaks(next);
-        setConfig((current) => current ? { ...current, tweaks: next } : current);
-        setMessage(t("updates.driverAppliesNextLaunch", { name: item.label }));
-      } catch (error) {
-        setMessage(String(error));
-      }
-      return;
-    }
     try {
       await saveTweaks(next);
-      setWindowsCompatTool(typeof selectionId === "string" ? selectionId : undefined);
+      if (requestId !== selectionRequest.current) return;
       setConfig((current) => current ? { ...current, tweaks: next } : current);
+      if (item.kind === "turnip") {
+        setMessage(t("updates.driverAppliesNextLaunch", { name: item.label }));
+        return;
+      }
+      setWindowsCompatTool(typeof selectionId === "string" ? selectionId : undefined);
       setMessage(t("updates.selected", { name: item.label }));
       const tools = await getProtonTools(true);
-      if (typeof selectionId === "string" && !tools.some((tool) => tool.id === selectionId)) {
+      if (requestId === selectionRequest.current && typeof selectionId === "string" && !tools.some((tool) => tool.id === selectionId)) {
         showModal(<CompatRestartModal name={item.label} />);
       }
     } catch (error) {
-      setMessage(String(error));
+      if (requestId === selectionRequest.current) setMessage(String(error));
     }
   };
   const removeLocal = async (item: LocalUpdate) => {
     if (!item.removable) return;
     setBusy(`delete:${item.id}`);
     try {
-      const result = await deleteLocalUpdate(item.kind, item.id);
+      const result = await deleteLocalUpdate(item.kind, item.id, item.installedId);
       const field = item.kind === "turnip" ? "turnipDriver" : "windowsCompatTool";
       if (result.selectionCleared) {
         const next = { ...config.tweaks, global: { ...config.tweaks.global } };
         delete next.global[field];
+        if (item.kind === "compatibility") setWindowsCompatTool(undefined);
         setConfig((current) => current ? { ...current, tweaks: next } : current);
       }
       await load();
@@ -156,7 +154,7 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
       await load();
       if (item.kind === "compatibility") {
         const tools = await getProtonTools(true);
-        const installedTool = tools.some((tool) => tool.id === (installed.installedId || item.id));
+        const installedTool = tools.some((tool) => tool.id === (installed.selectionId || item.selectionId || installed.installedId || item.id));
         if (!installedTool) {
           showModal(<CompatRestartModal name={item.label} />);
         }
@@ -170,15 +168,17 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
   const selectedDriverId = config.tweaks.global.turnipDriver || "stable";
   const selectedCompatId = config.tweaks.global.windowsCompatTool || "";
   const selectedDriver = local.find((item) => item.kind === "turnip" && item.id.replace(/^user:/, "") === selectedDriverId);
-  const selectedCompat = local.find((item) => item.kind === "compatibility" && (item.installedId || item.id) === selectedCompatId);
-  if (!state) return <PanelSection title={t("updates.title")}><Field label={loading ? t("updates.loading") : t("updates.unavailable")} description={message || (loading ? "" : t("updates.checkFailed"))} /><PanelSectionRow><ButtonItem disabled={!!busy} onClick={() => { void load(true); }}>{busy === "refresh" ? t("updates.checking") : t("updates.check")}</ButtonItem></PanelSectionRow></PanelSection>;
+  const selectedCompat = local.find((item) => item.kind === "compatibility" && (item.selectionId || item.installedId || item.id) === selectedCompatId);
+  if (!state) return <PanelSection title={t("updates.title")}><Field label={loading ? t("updates.loading") : t("updates.unavailable")} description={message || (loading ? "" : t("updates.checkFailed"))} /><div className="armada-update-check-row"><PanelSectionRow><div className="armada-update-action"><ButtonItem layout="below" disabled={!!busy} onClick={() => { void load(true); }}>{busy === "refresh" ? t("updates.checking") : t("updates.check")}</ButtonItem></div></PanelSectionRow></div></PanelSection>;
   return (
     <>
       <PanelSection title={t("updates.title")}>
         <Field description={t("updates.description")} />
-        <PanelSectionRow>
-          <ButtonItem disabled={!!busy} onClick={() => { void load(true); }}>{busy === "refresh" ? t("updates.checking") : t("updates.check")}</ButtonItem>
-        </PanelSectionRow>
+        <div className="armada-update-check-row">
+          <PanelSectionRow>
+            <div className="armada-update-action"><ButtonItem layout="below" disabled={!!busy} onClick={() => { void load(true); }}>{busy === "refresh" ? t("updates.checking") : t("updates.check")}</ButtonItem></div>
+          </PanelSectionRow>
+        </div>
         {!state.ok ? <Field label={t("updates.unavailable")} description={state.error || t("updates.checkFailed")} /> : null}
         {message ? <Field label={t("common.status")} description={message} /> : null}
       </PanelSection>
@@ -189,13 +189,13 @@ export function Updates({ config, setConfig }: { config: Config; setConfig: Disp
       {updateSection(t("updates.onlineCompat"), state.updates.filter((item) => item.kind === "compatibility"), busy, progress, (item) => { void install(item); }, t("updates.noUpdates"))}
       <PanelSection title={t("updates.localCompat")}>
         {local.filter((item) => item.kind === "compatibility").length ? local.filter((item) => item.kind === "compatibility").map((item) => (
-          <div key={`compatibility:${item.id}`} className="armada-update-entry">
+          <div key={`compatibility:${item.installedId || item.id}`} className="armada-update-entry">
             <PanelSectionRow>
-              <UpdateText label={item.label} description={item.version || (selectedCompatId === (item.installedId || item.id) ? t("updates.preferred") : "")} />
+              <UpdateText label={item.label} description={item.version || (selectedCompatId === (item.selectionId || item.installedId || item.id) ? t("updates.preferred") : "")} />
             </PanelSectionRow>
             <PanelSectionRow>
               <div className="armada-update-actions">
-                <div className="armada-update-action"><ButtonItem childrenContainerWidth="max" disabled={!!busy || selectedCompatId === (item.installedId || item.id)} onClick={() => { void selectLocal(item); }}>{selectedCompatId === (item.installedId || item.id) ? t("updates.preferred") : t("updates.select")}</ButtonItem></div>
+                <div className="armada-update-action"><ButtonItem childrenContainerWidth="max" disabled={!!busy || selectedCompatId === (item.selectionId || item.installedId || item.id)} onClick={() => { void selectLocal(item); }}>{selectedCompatId === (item.selectionId || item.installedId || item.id) ? t("updates.preferred") : t("updates.select")}</ButtonItem></div>
                 {item.removable ? <div className="armada-update-action"><ButtonItem childrenContainerWidth="max" disabled={!!busy} onClick={() => { void removeLocal(item); }}>{t("updates.remove")}</ButtonItem></div> : null}
               </div>
             </PanelSectionRow>

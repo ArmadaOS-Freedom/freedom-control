@@ -60,7 +60,7 @@ class UpdateError(RuntimeError):
 
 
 def _safe_id(value):
-    return isinstance(value, str) and value not in (".", "..") and bool(value) and len(value) <= 96 and all(
+    return isinstance(value, str) and value not in (".", "..") and not value.startswith(".__armada_control_update__") and bool(value) and len(value) <= 96 and all(
         c.isalnum() or c in "._-" for c in value
     )
 
@@ -95,7 +95,10 @@ def _ensure_safe_directory(path, create=False):
         except FileNotFoundError:
             if not create:
                 return False
-            current.mkdir(mode=0o755)
+            try:
+                current.mkdir(mode=0o755)
+            except FileExistsError:
+                pass
             info = current.lstat()
         if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
             raise UpdateError("update path contains a symlink or non-directory")
@@ -200,6 +203,8 @@ def _installed(kind, item_id):
         except (OSError, UpdateError):
             return False
         return (store / item_id / "libvulkan_freedreno.so").is_file()
+    if not isinstance(item_id, str) or not _safe_id(item_id):
+        return False
     for root in (COMPAT_DIR, SYSTEM_COMPAT_DIR):
         direct = root / item_id
         if any((direct / marker).is_file() for marker in ("compatibilitytool.vdf", "toolmanifest.vdf")):
@@ -208,7 +213,7 @@ def _installed(kind, item_id):
             for package_dir in root.iterdir():
                 manifest = package_dir / ".armada-control-update.json"
                 try:
-                    if json.loads(manifest.read_text(encoding="utf-8")).get("catalogId") == item_id:
+                    if _compat_catalog_id(package_dir) == item_id:
                         return True
                 except (OSError, ValueError):
                     continue
@@ -228,10 +233,22 @@ def _local_item(kind, item_id, label, version, removable):
 def _compat_catalog_id(directory):
     try:
         value = json.loads((directory / ".armada-control-update.json").read_text(encoding="utf-8"))
-        catalog_id = value.get("catalogId")
+        catalog_id = value.get("catalogId") if isinstance(value, dict) else None
         return catalog_id if _safe_id(catalog_id) else directory.name
     except (OSError, ValueError):
         return directory.name
+
+
+def _compat_tool_id(directory):
+    for filename in ("compatibilitytool.vdf", "toolmanifest.vdf"):
+        try:
+            text = (directory / filename).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        match = re.search(r'"compat_tools"\s*\{\s*"([^"\r\n]+)"\s*\{', text, re.I)
+        if match and _safe_id(match.group(1)):
+            return match.group(1)
+    return directory.name
 
 
 def local():
@@ -245,61 +262,62 @@ def local():
                 info = {}
             if item_id == "stable" or (variant.parent / "icd.aarch64.json").is_file():
                 items.append(_local_item("turnip", item_id, str(info.get("label") or item_id), str(info.get("version") or ""), False))
-        for library in sorted(TURNIP_DIR.glob("*/libvulkan_freedreno.so")):
-            item_id = library.parent.name
-            if not any(item["id"] == item_id for item in items) and _installed("turnip", item_id):
-                items.append(_local_item("turnip", USER_PREFIX + item_id, item_id, "", item_id != "stable"))
-    compatibility_items = {}
+    for library in sorted(TURNIP_DIR.glob("*/libvulkan_freedreno.so")):
+        item_id = library.parent.name
+        if not any(item["id"] == item_id for item in items) and _installed("turnip", item_id):
+            items.append(_local_item("turnip", USER_PREFIX + item_id, item_id, "", item_id != "stable"))
     for compat_root in (SYSTEM_COMPAT_DIR, COMPAT_DIR):
-      if compat_root.is_dir():
-        for marker in sorted(compat_root.glob("*/*.vdf")):
-            if marker.name not in ("compatibilitytool.vdf", "toolmanifest.vdf"):
-                continue
-            item_id = marker.parent.name
-            if not _safe_id(item_id):
-                continue
-            label = item_id
-            version = ""
-            try:
-                text = marker.read_text(encoding="utf-8", errors="replace")
-                for line in text.splitlines():
-                    if '"display_name"' in line:
-                        label = line.split('"')[-2] or label
-                        break
-            except OSError:
-                pass
-            catalog_id = _compat_catalog_id(marker.parent) if compat_root == COMPAT_DIR else item_id
-            item = _local_item("compatibility", catalog_id, label, version, compat_root == COMPAT_DIR)
-            item["installedId"] = item_id
-            compatibility_items[catalog_id] = item
-    items.extend(compatibility_items.values())
+        if compat_root.is_dir():
+            for marker in sorted(compat_root.glob("*/*.vdf")):
+                if marker.name not in ("compatibilitytool.vdf", "toolmanifest.vdf"):
+                    continue
+                item_id = marker.parent.name
+                if not _safe_id(item_id):
+                    continue
+                label = item_id
+                version = ""
+                try:
+                    text = marker.read_text(encoding="utf-8", errors="replace")
+                    for line in text.splitlines():
+                        if '"display_name"' in line:
+                            label = line.split('"')[-2] or label
+                            break
+                except OSError:
+                    pass
+                catalog_id = _compat_catalog_id(marker.parent) if compat_root == COMPAT_DIR else item_id
+                item = _local_item("compatibility", catalog_id, label, version, compat_root == COMPAT_DIR)
+                item["installedId"] = item_id
+                item["selectionId"] = _compat_tool_id(marker.parent)
+                items.append(item)
     return items
 
 
-def delete_local(kind, item_id):
+def delete_local(kind, item_id, installed_id=None):
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        code = "import importlib.util,json,sys; s=importlib.util.spec_from_file_location('updates',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(json.dumps(m.delete_local(sys.argv[2],sys.argv[3])))"
-        return json.loads(_run_as_armada(code, __file__, kind, item_id))
+        code = "import importlib.util,json,sys; s=importlib.util.spec_from_file_location('updates',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(json.dumps(m.delete_local(sys.argv[2],sys.argv[3],sys.argv[4] or None)))"
+        return json.loads(_run_as_armada(code, __file__, kind, item_id, installed_id or ""))
     selected_id = item_id
     if kind == "turnip" and isinstance(item_id, str) and item_id.startswith(USER_PREFIX):
         name = item_id[len(USER_PREFIX):]
         if not _safe_id(name):
             raise UpdateError("invalid driver id")
         store_path = TURNIP_DIR
-    elif kind == "compatibility" and _safe_id(item_id):
-        name = item_id
+    elif kind == "compatibility" and _safe_id(installed_id or item_id):
+        name = installed_id or item_id
         store_path = COMPAT_DIR
     else:
         raise UpdateError("the built-in driver cannot be removed")
     store = _safe_store(store_path)
     target = store / name
-    if kind == "compatibility" and not target.exists():
+    if kind == "compatibility" and installed_id is None and not target.exists():
         target = next((candidate for candidate in store.iterdir() if _compat_catalog_id(candidate) == item_id), target)
         name = target.name
     if target.is_symlink() or not target.is_dir() or not target.resolve().is_relative_to(store):
         raise UpdateError("package is not installed in its expected store")
     if not _safe_id(name):
         raise UpdateError("invalid installed package directory name")
+    if kind == "compatibility" and _compat_catalog_id(target) != item_id:
+        raise UpdateError("installed compatibility package does not match the selected catalog entry")
     with _installation_lock(store):
         if kind == "compatibility":
             try:
@@ -310,17 +328,21 @@ def delete_local(kind, item_id):
     return {"kind": kind, "id": item_id, "selectionId": selected_id, "installedId": name, "removed": True}
 
 
-def local_selection_id(kind, item_id):
+def local_selection_id(kind, item_id, installed_id=None):
     if kind == "turnip" and isinstance(item_id, str) and item_id.startswith(USER_PREFIX):
         return item_id[len(USER_PREFIX):]
     if kind == "compatibility" and _safe_id(item_id):
         store = _safe_store(COMPAT_DIR)
+        if installed_id and _safe_id(installed_id):
+            target = store / installed_id
+            if target.is_dir() and not target.is_symlink() and target.resolve().is_relative_to(store):
+                return _compat_tool_id(target)
         direct = store / item_id
         if direct.is_dir() and not direct.is_symlink():
-            return direct.name
+            return _compat_tool_id(direct)
         for candidate in store.iterdir():
             if candidate.is_dir() and not candidate.is_symlink() and _compat_catalog_id(candidate) == item_id:
-                return candidate.name
+                return _compat_tool_id(candidate)
     return item_id
 
 
@@ -546,12 +568,14 @@ def _safe_extract_tar(archive, destination):
                 total += entry.size
                 if count > MAX_FILES or total > MAX_PACKAGE_BYTES:
                     raise UpdateError("update package is too large")
+        directory_modes = []
         for entry in entries:
             target = destination / entry.name
             target.parent.mkdir(parents=True, exist_ok=True)
             if entry.isdir():
                 target.mkdir(parents=True, exist_ok=True)
-                target.chmod(entry.mode & 0o777 & ~0o6000)
+                if target != destination:
+                    directory_modes.append((target, entry.mode & 0o777 & ~0o6000))
             elif entry.isfile():
                 source = bundle.extractfile(entry)
                 if source is None:
@@ -574,6 +598,20 @@ def _safe_extract_tar(archive, destination):
                 if not link_target.is_file():
                     raise UpdateError("compatibility package contains an invalid hard link")
                 os.link(link_target, target)
+        for directory, mode in reversed(directory_modes):
+            directory.chmod(mode)
+
+
+def _validate_package_links(source):
+    root = source.resolve()
+    for directory, directories, files in os.walk(source, followlinks=False):
+        for name in directories + files:
+            path = pathlib.Path(directory) / name
+            if not path.is_symlink():
+                continue
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root):
+                raise UpdateError("compatibility package contains a link outside its installed directory")
 
 
 def _package_root(directory, kind):
@@ -602,8 +640,9 @@ def _publish_package(source, store_path, package_id, item):
         raise UpdateError("package directory name is invalid")
     with _installation_lock(store):
         destination = store / package_name
-        staging = store / ("." + package_name + ".tmp")
-        backup = store / ("." + package_name + ".old")
+        transaction = ".__armada_control_update__" + hashlib.sha256(package_name.encode()).hexdigest()[:20]
+        staging = store / (transaction + ".tmp")
+        backup = store / (transaction + ".old")
         if destination.is_symlink():
             raise UpdateError("refusing to replace a symlinked package")
         if destination.exists() and item["kind"] == "compatibility" and not any(
@@ -617,6 +656,8 @@ def _publish_package(source, store_path, package_id, item):
         elif backup.exists():
             shutil.rmtree(backup)
         shutil.rmtree(staging, ignore_errors=True)
+        if item["kind"] == "compatibility":
+            _validate_package_links(source)
         shutil.copytree(source, staging, symlinks=True)
         if item["kind"] == "compatibility":
             (staging / ".armada-control-update.json").write_text(
@@ -652,6 +693,8 @@ def _install_archive(archive, item):
         else:
             _safe_extract(archive, unpacked)
         source = _package_root(unpacked, item["kind"])
+        if item["kind"] == "compatibility":
+            _validate_package_links(source)
         if item["kind"] == "turnip":
             if not (source / "libvulkan_freedreno.so").is_file():
                 raise UpdateError("Turnip package is missing its runtime files")
@@ -671,7 +714,7 @@ def _install_archive(archive, item):
                 raise UpdateError("compatibility package is missing its Steam tool manifest")
             destination_root = COMPAT_DIR
         package_name = _publish_package(source, destination_root, item["id"], item)
-        return {"id": item["id"], "installedId": package_name, "kind": item["kind"], "label": item["label"], "version": item["version"], "installed": True}
+        return {"id": item["id"], "installedId": package_name, "selectionId": _compat_tool_id(destination_root / package_name) if item["kind"] == "compatibility" else package_name, "kind": item["kind"], "label": item["label"], "version": item["version"], "installed": True}
 
 
 def install(item_id):

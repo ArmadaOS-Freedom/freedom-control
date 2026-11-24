@@ -14,9 +14,15 @@ spec = importlib.util.spec_from_file_location("updates", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 `;
+const pythonExecutable = process.env.PYTHON || (process.platform === "win32" ? "python" : "python3");
+const runProcess = (args) => {
+  const result = spawnSync(pythonExecutable, args, { encoding: "utf8" });
+  if (result.error) throw result.error;
+  if (result.signal) throw new Error(`Python process terminated by ${result.signal}`);
+  return result;
+};
 const runPython = (code, args = []) => {
-  const executable = process.platform === "win32" ? "python" : "python3";
-  const result = spawnSync(executable, ["-c", python + code, fileURLToPath(new URL("../py_modules/armada_control/updates.py", import.meta.url)), ...args], { encoding: "utf8" });
+  const result = runProcess(["-c", python + code, fileURLToPath(new URL("../py_modules/armada_control/updates.py", import.meta.url)), ...args]);
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return result.stdout;
 };
@@ -42,6 +48,46 @@ test("Proton catalog uses DroidDeck ARM64 release sources and archive formats", 
   assert.match(source, /releases\.atom/);
   assert.match(source, /expanded_assets/);
   assert.match(source, /_release_page_assets/);
+});
+
+test("compatibility identity and driver-store discovery cover installed edge cases", () => {
+  assert.match(source, /def _compat_tool_id\(/);
+  assert.match(source, /isinstance\(value, dict\)/);
+  assert.match(source, /for library in sorted\(TURNIP_DIR\.glob/);
+  assert.match(source, /installed_id=None/);
+  assert.match(source, /__armada_control_update__/);
+  assert.match(source, /def _validate_package_links\(/);
+});
+
+test("compatibility metadata falls back safely and user drivers list without system drivers", () => {
+  const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
+  try {
+    runPython(`
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[2])
+module.HOME = root / "home"
+module.SYSTEM_TURNIP_DIR = root / "missing-system-turnip"
+module.TURNIP_DIR = module.HOME / ".local/share/armada/turnip"
+module.SYSTEM_COMPAT_DIR = root / "missing-system-compat"
+module.COMPAT_DIR = module.HOME / ".local/share/Steam/compatibilitytools.d"
+package = module.TURNIP_DIR / "custom-driver"
+package.mkdir(parents=True)
+(package / "libvulkan_freedreno.so").write_text("driver")
+items = module.local()
+assert any(item["id"] == "user:custom-driver" for item in items), items
+compat = module.COMPAT_DIR / "Proton-A"
+compat.mkdir(parents=True)
+(compat / "compatibilitytool.vdf").write_text('"compatibilitytools" { "compat_tools" { "Steam-Key" { "display_name" "Custom" } } }')
+metadata = compat / ".armada-control-update.json"
+metadata.write_text("[]")
+assert module._compat_catalog_id(compat) == "Proton-A"
+assert module._compat_tool_id(compat) == "Steam-Key"
+rows = [item for item in module.local() if item["kind"] == "compatibility"]
+assert rows == [{"id": "Proton-A", "kind": "compatibility", "label": "Custom", "version": "", "removable": True, "installedId": "Proton-A", "selectionId": "Steam-Key"}], rows
+`, [temp]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test("local update management follows Armada system and user component paths", () => {
@@ -77,6 +123,7 @@ archive, destination = sys.argv[2:]
 with tarfile.open(archive, "w:gz") as bundle:
     root = tarfile.TarInfo("./")
     root.type = tarfile.DIRTYPE
+    root.mode = 0o755
     bundle.addfile(root)
     content = b"#!/bin/sh\\nexit 0\\n"
     entry = tarfile.TarInfo("Proton/proton")
@@ -95,8 +142,7 @@ assert mode == 0o755, oct(mode)
 test("tar extraction rejects files at the extraction root", () => {
   const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
   try {
-    const executable = process.platform === "win32" ? "python" : "python3";
-    const result = spawnSync(executable, ["-c", python + `
+    const result = runProcess(["-c", python + `
 import io, tarfile
 archive, destination = sys.argv[2:]
 with tarfile.open(archive, "w") as bundle:
@@ -109,7 +155,7 @@ except module.UpdateError:
     pass
 else:
     raise AssertionError("root file accepted")
-`, fileURLToPath(new URL("../py_modules/armada_control/updates.py", import.meta.url)), join(temp, "archive.tar"), join(temp, "out")], { encoding: "utf8" });
+`, fileURLToPath(new URL("../py_modules/armada_control/updates.py", import.meta.url)), join(temp, "archive.tar"), join(temp, "out")]);
     assert.equal(result.status, 0, result.stderr);
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -117,6 +163,8 @@ else:
 });
 
 test("zip extraction rejects targets that resolve to the extraction root", () => {
+  const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
+  try {
   const result = runPython(`
 import pathlib, sys, zipfile
 archive, destination = sys.argv[2:]
@@ -128,8 +176,11 @@ except module.UpdateError:
     pass
 else:
     raise AssertionError("zip extraction root accepted as a file")
-`, [join(tmpdir(), `armada-root-zip-${process.pid}.zip`), join(tmpdir(), `armada-root-zip-out-${process.pid}`)]);
+`, [join(temp, "archive.zip"), join(temp, "out")]);
   assert.equal(result, "");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test("safe store rejects symlinked parents", { skip: platform() === "win32" }, () => {
@@ -160,6 +211,8 @@ test("publication restores an existing install when staging publication fails", 
     const result = runPython(`
 import pathlib, unittest.mock
 source, store = map(pathlib.Path, sys.argv[2:])
+module.HOME = store.parent
+module.os.geteuid = lambda: 1000
 source.mkdir()
 (source / "libvulkan_freedreno.so").write_text("new")
 store.mkdir()
@@ -169,7 +222,7 @@ destination.mkdir()
 item = {"kind": "turnip"}
 real_rename = pathlib.Path.rename
 def fail_staging(self, target):
-    if self.name == ".driver.tmp":
+    if self.name.endswith(".tmp"):
         raise OSError("simulated publication failure")
     return real_rename(self, target)
 try:

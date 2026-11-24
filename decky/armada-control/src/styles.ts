@@ -215,6 +215,33 @@ export const styles = `
         min-width: 0;
         flex: 0 0 auto;
       }
+      .armada-update-check-row,
+      .armada-update-check-row > [class*="PanelSectionRow"] {
+        box-sizing: border-box;
+        display: block;
+        width: 100%;
+        min-width: 0;
+        margin: 0;
+        padding-left: 0;
+        padding-right: 0;
+      }
+      .armada-update-check-row .armada-update-action {
+        display: block;
+        width: 100%;
+      }
+      .armada-update-check-row .Panel > div:first-child {
+        display: none !important;
+      }
+      .armada-update-check-row .Panel > div:last-child {
+        flex: 1 1 100% !important;
+        width: 100% !important;
+        min-width: 0 !important;
+      }
+      .armada-update-check-row .Panel button {
+        display: block;
+        width: 100% !important;
+        min-width: 0 !important;
+      }
       .armada-update-action > * {
         width: 100%;
         min-width: 0;

@@ -69,6 +69,7 @@ export interface UpdateItem {
   verified?: boolean;
   installed: boolean;
   installedId?: string;
+  selectionId?: string;
 }
 
 export interface UpdatesState {

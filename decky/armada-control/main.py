@@ -26,6 +26,7 @@ from armada_control.system import (
     swipe_gestures_in_game_enabled,
 )
 from armada_control.tweaks import load_compat_applied, load_tweaks, save_compat_applied, save_tweaks
+from armada_control import updates as update_module
 from armada_control.updates import current as current_updates, delete_local, install as install_update, local as local_updates, local_selection_id, progress as update_progress, refresh as refresh_updates
 from armada_control.fan_curves import get_state as get_fans_state, save_all as save_fan_curves, save_charging_pwm
 from armada_control.fan_sensors import get_current_temp
@@ -142,27 +143,31 @@ class Plugin:
     async def get_local_updates(self):
         return await asyncio.to_thread(local_updates)
 
-    async def delete_local_update(self, kind, update_id):
+    async def delete_local_update(self, kind, update_id, installed_id=None):
         async with self._tweaks_lock:
             tweaks = await asyncio.to_thread(load_tweaks)
             global_tweaks = dict(tweaks.get("global", {}))
             selected = global_tweaks.get("turnipDriver") if kind == "turnip" else global_tweaks.get("windowsCompatTool")
             field = "turnipDriver" if kind == "turnip" else "windowsCompatTool"
-            installed_id = await asyncio.to_thread(local_selection_id, kind, update_id)
-            matches = selected in (update_id, installed_id)
+            installed_name = installed_id or update_id
+            selection_id = await asyncio.to_thread(local_selection_id, kind, update_id, installed_name)
+            matches = selected in (update_id, installed_name, selection_id)
             if matches:
                 updated = dict(tweaks)
                 global_tweaks.pop(field, None)
                 updated["global"] = global_tweaks
                 await asyncio.to_thread(save_tweaks, updated)
                 try:
-                    result = await asyncio.to_thread(delete_local, kind, update_id)
+                    result = await asyncio.to_thread(delete_local, kind, update_id, installed_name if kind == "compatibility" else None)
                 except Exception:
-                    await asyncio.to_thread(save_tweaks, tweaks)
+                    package_name = installed_name.removeprefix("user:") if kind == "turnip" else installed_name
+                    store = update_module.TURNIP_DIR if kind == "turnip" else update_module.COMPAT_DIR
+                    if await asyncio.to_thread(update_module._valid_install, store / package_name, kind):
+                        await asyncio.to_thread(save_tweaks, tweaks)
                     raise
                 result["selectionCleared"] = True
             else:
-                result = await asyncio.to_thread(delete_local, kind, update_id)
+                result = await asyncio.to_thread(delete_local, kind, update_id, installed_name if kind == "compatibility" else None)
         return result
 
     async def set_swipe_gestures_enabled(self, enabled):
