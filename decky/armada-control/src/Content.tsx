@@ -102,6 +102,10 @@ export function Content() {
     setPauseTweaksSave(true);
     try {
       await action(await flushTweaks(config.tweaks));
+    } catch (error) {
+      savedTweaksSnapshot.current = "\0unconfirmed";
+      await load();
+      throw error;
     } finally {
       updateTweaksPending.current = false;
       setPauseTweaksSave(false);

@@ -313,17 +313,17 @@ def delete_local(kind, item_id, installed_id=None):
     else:
         raise UpdateError("the built-in driver cannot be removed")
     store = _safe_store(store_path)
-    target = store / name
-    if kind == "compatibility" and installed_id is None and not target.exists():
-        target = next((candidate for candidate in store.iterdir() if _compat_catalog_id(candidate) == item_id), target)
-        name = target.name
-    if target.is_symlink() or not target.is_dir() or not target.resolve().is_relative_to(store):
-        raise UpdateError("package is not installed in its expected store")
-    if not _safe_id(name):
-        raise UpdateError("invalid installed package directory name")
-    if kind == "compatibility" and _compat_catalog_id(target) != item_id:
-        raise UpdateError("installed compatibility package does not match the selected catalog entry")
     with _installation_lock(store):
+        target = store / name
+        if kind == "compatibility" and installed_id is None and not target.exists():
+            target = next((candidate for candidate in store.iterdir() if _compat_catalog_id(candidate) == item_id), target)
+            name = target.name
+        if target.is_symlink() or not target.is_dir() or not target.resolve().is_relative_to(store):
+            raise UpdateError("package is not installed in its expected store")
+        if not _safe_id(name):
+            raise UpdateError("invalid installed package directory name")
+        if kind == "compatibility" and _compat_catalog_id(target) != item_id:
+            raise UpdateError("installed compatibility package does not match the selected catalog entry")
         if kind == "compatibility":
             try:
                 selected_id = _compat_catalog_id(target)
@@ -629,20 +629,20 @@ def _package_root(directory, kind):
     raise UpdateError("update package does not contain its required runtime manifest")
 
 
-def _publish_package(source, store_path, package_id, item):
+def _publish_package(source, store_path, package_id, item, flat_root=False):
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         handoff = pathlib.Path(tempfile.mkdtemp(prefix="armada-update-handoff-"))
         os.chmod(handoff, 0o711)
         try:
             handoff_source = handoff / source.name
             shutil.copytree(source, handoff_source, symlinks=True)
-            code = "import importlib.util,json,pathlib,sys; s=importlib.util.spec_from_file_location('updates',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(json.dumps(m._publish_package(pathlib.Path(sys.argv[2]),pathlib.Path(sys.argv[3]),sys.argv[4],json.loads(sys.argv[5]))))"
-            output = _run_as_armada(code, __file__, handoff_source, store_path, package_id, json.dumps(item))
+            code = "import importlib.util,json,pathlib,sys; s=importlib.util.spec_from_file_location('updates',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); print(json.dumps(m._publish_package(pathlib.Path(sys.argv[2]),pathlib.Path(sys.argv[3]),sys.argv[4],json.loads(sys.argv[5]),sys.argv[6]=='true')))"
+            output = _run_as_armada(code, __file__, handoff_source, store_path, package_id, json.dumps(item), str(flat_root).lower())
             return json.loads(output)
         finally:
             shutil.rmtree(handoff, ignore_errors=True)
     store = _safe_store(store_path, create=True)
-    package_name = source.name if item["kind"] == "compatibility" else package_id
+    package_name = (package_id if flat_root else source.name) if item["kind"] == "compatibility" else package_id
     if not _safe_id(package_name):
         raise UpdateError("package directory name is invalid")
     with _installation_lock(store):
@@ -720,7 +720,7 @@ def _install_archive(archive, item):
             if not ((source / "compatibilitytool.vdf").is_file() or (source / "toolmanifest.vdf").is_file()):
                 raise UpdateError("compatibility package is missing its Steam tool manifest")
             destination_root = COMPAT_DIR
-        package_name = _publish_package(source, destination_root, item["id"], item)
+        package_name = _publish_package(source, destination_root, item["id"], item, flat_root=source == unpacked)
         return {"id": item["id"], "installedId": package_name, "selectionId": _compat_tool_id(destination_root / package_name) if item["kind"] == "compatibility" else package_name, "kind": item["kind"], "label": item["label"], "version": item["version"], "installed": True}
 
 

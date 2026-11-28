@@ -47,6 +47,7 @@ test("local update buttons keep selection and deletion recovery from overlapping
   let failRemoval = true;
   let installedId;
   let inventoryReads = 0;
+  let localReads = 0;
   let finishSave;
   let finishRecovery;
   const savePending = new Promise((resolve) => { finishSave = resolve; });
@@ -78,7 +79,7 @@ test("local update buttons keep selection and deletion recovery from overlapping
       getConfig() { return recoveryPending; },
       async installUpdate(id) { installedId = id; return onlineDriver; },
       async getUpdates() { return catalog; },
-      async getLocalUpdates() { return drivers; },
+      async getLocalUpdates() { localReads += 1; return drivers; },
     },
     "../components/ArmadaModalRoot": {},
     "../i18n": { t: (key) => key },
@@ -125,6 +126,7 @@ test("local update buttons keep selection and deletion recovery from overlapping
   finishRecovery({ tweaks: savedTweaks });
   await new Promise(setImmediate);
   assert.equal(config.tweaks.global.turnipDriver, "driver-b");
+  assert.equal(localReads, 1);
   assert.ok(renderButtons().some((button) => !button.disabled));
 
   failRemoval = false;
@@ -135,6 +137,60 @@ test("local update buttons keep selection and deletion recovery from overlapping
   await new Promise(setImmediate);
   assert.equal(installedId, "driver-c");
   assert.equal(inventoryReads, 2);
+});
+
+test("compatibility packages with flat archives publish under their catalog IDs", () => {
+  const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
+  try {
+    runPython(`
+import pathlib, sys
+source, store = map(pathlib.Path, sys.argv[2:])
+module.HOME = store.parent
+module.os.geteuid = lambda: 1000
+source.mkdir(parents=True)
+(source / "compatibilitytool.vdf").write_text('"compat_tools" { "tool-one" {} }')
+store.mkdir()
+item = {"kind": "compatibility"}
+module._publish_package(source, store, "catalog-one", item, flat_root=True)
+module._publish_package(source, store, "catalog-two", item, flat_root=True)
+assert (store / "catalog-one" / "compatibilitytool.vdf").is_file()
+assert (store / "catalog-two" / "compatibilitytool.vdf").is_file()
+`, [join(temp, "unpacked"), join(temp, "store")]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("compatibility deletion revalidates identity after acquiring the store lock", () => {
+  const temp = mkdtempSync(join(tmpdir(), "armada-update-test-"));
+  try {
+    runPython(`
+import contextlib, json, pathlib, sys
+home = pathlib.Path(sys.argv[2])
+store = home / ".steam/root/compatibilitytools.d"
+store.mkdir(parents=True)
+module.HOME = home
+module.COMPAT_DIR = store
+target = store / "shared-name"
+target.mkdir()
+(target / ".armada-control-update.json").write_text(json.dumps({"catalogId": "catalog-one"}))
+@contextlib.contextmanager
+def replace_before_lock(_store):
+    (target / ".armada-control-update.json").write_text(json.dumps({"catalogId": "catalog-two"}))
+    yield
+module._installation_lock = replace_before_lock
+try:
+    module.delete_local("compatibility", "catalog-one", "shared-name")
+except module.UpdateError:
+    pass
+else:
+    raise AssertionError("stale deletion unexpectedly succeeded")
+assert target.is_dir()
+assert module._compat_catalog_id(target) == "catalog-two"
+`, [temp]);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test("flushing tweaks waits for submitted writes and restores an unconfirmed snapshot", async () => {

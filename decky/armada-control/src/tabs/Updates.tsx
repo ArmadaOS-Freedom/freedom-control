@@ -143,6 +143,10 @@ export function Updates({ config, applySavedTweaks, withSavedTweaks, refreshDriv
           }
         } catch (error) {
           try {
+            setLocal(await getLocalUpdates());
+          } catch {
+          }
+          try {
             const current = await getConfig();
             applySavedTweaks(current.tweaks);
             setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
