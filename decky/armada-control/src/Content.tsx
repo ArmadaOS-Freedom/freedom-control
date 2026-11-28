@@ -34,6 +34,7 @@ export function Content() {
   const savedPowerSnapshot = useRef("");
   const savedTweaksSnapshot = useRef("");
   const updateTweaksPending = useRef(false);
+  const tweaksRecoveryRequired = useRef(false);
   const [pauseTweaksSave, setPauseTweaksSave] = useState(false);
   const installedGamesRequested = useRef(false);
   const load = useCallback(async () => {
@@ -92,11 +93,23 @@ export function Content() {
     };
   }, [!!config]);
   useDebouncedSave({ config, field: "power", snapshot: savedPowerSnapshot, save: savePowerConfig, setConfig, onError: load });
-  const flushTweaks = useDebouncedSave({
+  const persistTweaks = useDebouncedSave({
     config, field: "tweaks", snapshot: savedTweaksSnapshot, save: saveTweaks, setConfig,
     paused: pauseTweaksSave, onError: () => { if (!updateTweaksPending.current) void load(); },
   });
   if (!config) return <PanelSection title="Freedom Control"><Field label={message === "Loading" ? t("common.loading") : message} /></PanelSection>;
+  const recoverTweaks = async () => {
+    const current = await getConfig();
+    savedTweaksSnapshot.current = JSON.stringify(current.tweaks);
+    setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
+    setConfig((stored) => stored ? { ...stored, tweaks: current.tweaks, turnipDrivers: current.turnipDrivers } : stored);
+    tweaksRecoveryRequired.current = false;
+    if (!updateTweaksPending.current) setPauseTweaksSave(false);
+    return current.tweaks;
+  };
+  const flushTweaks = (tweaks: Tweaks) => (
+    tweaksRecoveryRequired.current ? recoverTweaks() : persistTweaks(tweaks)
+  );
   const withSavedTweaks = async (action: (tweaks: Tweaks) => Promise<void>) => {
     if (updateTweaksPending.current) return;
     updateTweaksPending.current = true;
@@ -106,19 +119,16 @@ export function Content() {
       try {
         await action(saved);
       } catch (error) {
-        savedTweaksSnapshot.current = "\0unconfirmed";
+        tweaksRecoveryRequired.current = true;
         try {
-          const current = await getConfig();
-          applySavedTweaks(current.tweaks);
-          setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
-          setConfig((stored) => stored ? { ...stored, turnipDrivers: current.turnipDrivers } : stored);
+          await recoverTweaks();
         } catch {
         }
         throw error;
       }
     } finally {
       updateTweaksPending.current = false;
-      setPauseTweaksSave(false);
+      setPauseTweaksSave(tweaksRecoveryRequired.current);
     }
   };
   const applySavedTweaks = (tweaks: Tweaks) => {

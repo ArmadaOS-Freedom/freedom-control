@@ -239,8 +239,10 @@ const recoveryTree = mountContent("en", { ...baseConfig, tweaks: editedTweaks })
 const recoveryHooks = globalThis.__tfHooks;
 const updateActions = findAll(recoveryTree, (node) => node.type === "Updates")[0].props;
 let recoveryReads = 0;
+let recoveryFails = false;
 recoveryHooks.readConfig = async () => {
   recoveryReads += 1;
+  if (recoveryFails) throw new Error("recovery read failed");
   return { ...baseConfig, tweaks: savedTweaks };
 };
 recoveryHooks.flushTweaks = async () => { throw new Error("flush failed"); };
@@ -248,9 +250,21 @@ await assert.rejects(updateActions.withSavedTweaks(() => assert.fail("update sta
 assert.equal(recoveryReads, 0);
 assert.equal(recoveryHooks.states[1].tweaks, editedTweaks);
 recoveryHooks.flushTweaks = async (tweaks) => tweaks;
-await assert.rejects(updateActions.withSavedTweaks(async () => { throw new Error("action response failed"); }), /action response failed/);
-assert.equal(recoveryReads, 1);
+recoveryFails = true;
+await assert.rejects(updateActions.withSavedTweaks(async () => { throw new Error("delete failed"); }), /delete failed/);
+assert.equal(recoveryHooks.states[1].tweaks, editedTweaks);
+assert.equal(recoveryHooks.states[3], true, "autosave stays paused while saved tweaks are unconfirmed");
+recoveryHooks.flushTweaks = async () => { throw new Error("stale tweaks must not be flushed"); };
+await assert.rejects(updateActions.withSavedTweaks(async () => assert.fail("action ran before recovery succeeded")), /recovery read failed/);
+const compatibilityActions = findAll(renderContent(), (node) => node.type === "Compatibility")[0].props;
+await assert.rejects(compatibilityActions.flushTweaks(editedTweaks), /recovery read failed/);
+assert.equal(recoveryHooks.states[3], true);
+assert.equal(recoveryReads, 3);
+recoveryFails = false;
+await updateActions.withSavedTweaks(async (tweaks) => assert.equal(tweaks, savedTweaks));
+assert.equal(recoveryHooks.states[3], false, "autosave resumes after saved tweaks are reloaded");
 assert.equal(recoveryHooks.states[1].tweaks, savedTweaks);
+assert.equal(recoveryReads, 4);
 assert.equal(recoveryHooks.steamTool, "tool-b");
 
 // The optional pages follow the device flags, and TF stays before Advanced.
