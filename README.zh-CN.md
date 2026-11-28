@@ -19,6 +19,7 @@ Freedom Control 沿用 Armada Control 的插件架构与宿主服务接口，保
 - **CPU governor 显示名称**：界面以可读名称显示所选 governor，而不只是内核标识符。
 - **触屏手柄单页**：内置触摸屏上的单页手柄，支持 Xbox/PS/Switch 预设、每个预设独立的四向/八向方向键、全局统一的白色/黑色按键颜色、删除自定义预设、删除并还原模板组件、四枚面键整体移动缩放、手柄导航、显示隐藏与震动。全屏布局编辑器支持左右切换工具面板；平板预设左右对称、摇杆保持圆形并等比缩放。可选的“全屏触控右摇杆”默认关闭，开启后隐藏固定右摇杆，在空白区域滑动即可控制右摇杆，停止或松手后回中。
 - **TF 卡游戏库标签页**：把已分配 TF 卡的 Linux 保留分区转换为 Steam 游戏库，同时保留该卡的 Android 存储。
+- **更新标签页**：默认直接检查 Armada 的 Linux Vulkan 游戏驱动（Turnip 变体）和 ARM64 Proton 兼容层发布源，也支持可选目录覆盖。下载重定向始终限制为 HTTPS；发布方提供 SHA-256 时会校验，并限制归档路径、权限位、大小与文件数量。安装采用可恢复的目录切换。
 
 SM8850 目前处于基础集成阶段，性能调优仍在进行。
 
@@ -36,6 +37,16 @@ tests/                  针对 SM8850 电源配置的回归测试
 - `tests/sm8850-power-test.py` 基于本仓库的配置源码，覆盖 SM8850 电源配置的分层与 CPU 频率上限。
 
 `decky/armada-control` 路径与 Python 包名 `armada_control` 沿用上游名称，以兼容既有的 Armada 集成。
+
+## 驱动与兼容层更新
+
+更新页将 DroidDeck 的双驱动模型调整为 Armada 的 Linux-only 运行时：
+
+- **Linux 游戏驱动**：glibc/aarch64 Turnip 包，安装到 `~/.local/share/armada/turnip/<id>`。现有 `armada-game-launch` 会通过 `VK_DRIVER_FILES` 为原生游戏和 FEX 游戏选择它。
+- **兼容层**：在线安装 DroidDeck 同类 ARM64 Proton 发布包到 Steam 的 `compatibilitytools.d/<id>`；本地兼容层可选择或删除。FEX 执行环境由 Armada 系统/Steam 管理，不作为独立 Proton 下载包提供。
+- **不导入 Android 显示驱动**：Armada 通过 Linux 主机 DRM/Vulkan 栈渲染，DroidDeck 的 Android 驱动半边没有可兼容的目标目录。目录应发布 Armada Linux 包，而不是 Android/Linux 双包。
+
+默认情况下，更新页直接检查与 DroidDeck 相同的发布源：`The412Banner/Banners-Turnip` 和 `WinNative-Emu/Drivers`，只提供 `-Linux.zip` 游戏驱动，并排除 Android/Linux 双包。下游构建可以通过 `ARMADA_UPDATE_CATALOG_URL` 提供私有目录；目录格式使用 `kind`、`id`、`label`、`version`、`url` 和可选的小写 `sha256`。
 
 ## `system_files` 中的电源文件
 

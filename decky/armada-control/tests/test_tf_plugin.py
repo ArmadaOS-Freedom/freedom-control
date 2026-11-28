@@ -17,6 +17,7 @@ import tempfile
 import threading
 import types
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "py_modules"))
@@ -167,6 +168,40 @@ class TfPluginTests(unittest.TestCase):
         self.plugin._tf = fake
         self.call(self.plugin.start_tf_library, "2" * 32)
         self.assertEqual(fake.calls, [("2" * 32, False)])
+
+    def test_delete_failure_restores_only_the_matching_installed_tool(self):
+        from armada_control import updates
+
+        selected_tweaks = {"global": {"windowsCompatTool": "Steam-Key"}, "games": {}}
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            store = home / ".steam/root/compatibilitytools.d"
+            package = store / "installed"
+            package.mkdir(parents=True)
+            (package / "compatibilitytool.vdf").write_text('"compat_tools" { "Steam-Key" {} }')
+            (package / ".armada-control-update.json").write_text(json.dumps({"catalogId": "selected-catalog"}))
+            with mock.patch.object(updates, "HOME", home), \
+                    mock.patch.object(updates, "COMPAT_DIR", store), \
+                    mock.patch.object(updates.os, "geteuid", return_value=1000, create=True), \
+                    mock.patch.object(self.main, "load_tweaks", return_value=selected_tweaks), \
+                    mock.patch.object(self.main, "local_selection_id", return_value="Steam-Key"), \
+                    mock.patch.object(self.main, "save_tweaks") as save, \
+                    mock.patch.object(self.main, "delete_local", side_effect=updates.UpdateError("identity changed")):
+                for catalog, tool, restored in (
+                    ("replacement", "Steam-Key", False),
+                    ("selected-catalog", "Replacement-Key", False),
+                    ("selected-catalog", "Steam-Key", True),
+                ):
+                    with self.subTest(catalog=catalog, tool=tool):
+                        (package / ".armada-control-update.json").write_text(json.dumps({"catalogId": catalog}))
+                        (package / "compatibilitytool.vdf").write_text(f'"compat_tools" {{ "{tool}" {{}} }}')
+                        save.reset_mock()
+                        with self.assertRaisesRegex(updates.UpdateError, "identity changed"):
+                            self.call(self.plugin.delete_local_update, "compatibility", "selected-catalog", "installed")
+                        self.assertEqual(save.call_count, 2 if restored else 1)
+                        self.assertEqual(save.call_args_list[0].args[0]["global"], {})
+                        if restored:
+                            self.assertEqual(save.call_args.args[0], selected_tweaks)
 
     def test_every_rpc_runs_in_a_worker_thread(self):
         fake = FakeTf()

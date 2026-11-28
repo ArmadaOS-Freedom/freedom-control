@@ -58,6 +58,48 @@ export interface TurnipDriver {
   version: string;
 }
 
+export interface UpdateItem {
+  id: string;
+  kind: "turnip" | "compatibility";
+  label: string;
+  version: string;
+  description: string;
+  url: string;
+  sha256: string;
+  verified?: boolean;
+  installed: boolean;
+  installedId?: string;
+  selectionId?: string;
+}
+
+export interface UpdatesState {
+  ok: boolean;
+  source: string;
+  generatedAt?: string;
+  error?: string;
+  updates: UpdateItem[];
+}
+
+export interface LocalUpdate {
+  id: string;
+  kind: "turnip" | "compatibility";
+  label: string;
+  version: string;
+  removable: boolean;
+  selectionId?: string;
+  selectionCleared?: boolean;
+  installedId?: string;
+  storeId?: "system" | "user";
+}
+
+export interface UpdateProgress {
+  id: string;
+  phase: "idle" | "checking" | "downloading" | "extracting" | "installing" | "complete" | "error";
+  percent: number;
+  downloaded: number;
+  total: number;
+}
+
 // A text in env-presets.json is either one string or one string per locale, so a
 // label that needs no translation does not cost four lines.
 export type LocalizedText = string | Record<string, string>;

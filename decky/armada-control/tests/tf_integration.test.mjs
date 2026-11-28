@@ -137,18 +137,20 @@ export const Tabs = "Tabs";`,
 export const jsx = (type, props) => ({ type, props: props || {} });
 export const jsxs = jsx;
 export const jsxDEV = jsx;`,
-  "./backend": `export const getConfig = async () => ({});
+  "./backend": `export const getConfig = () => globalThis.__tfHooks.readConfig();
 export const getInstalledGames = async () => [];
 export const savePowerConfig = async () => {};
 export const saveTweaks = async () => {};`,
   "./components/RgbLighting": `export const RgbLighting = "RgbLighting";`,
-  "./hooks/useDebouncedSave": `export const useDebouncedSave = () => {};`,
+  "./hooks/useDebouncedSave": `export const useDebouncedSave = ({ field }) => field === "tweaks" ? (tweaks) => globalThis.__tfHooks.flushTweaks(tweaks) : () => {};`,
   "./hooks/useLocale": `export const useLocale = () => globalThis.__tfLocale;`,
   "./i18n": `export const t = (key) => key;`,
-  "./icons": `export const tabIcons = { Compatibility: {}, Power: {}, Touch: {}, Fans: {}, RGB: {}, TF: {}, Advanced: {} };`,
+  "./icons": `export const tabIcons = { Compatibility: {}, Updates: {}, Power: {}, Touch: {}, Fans: {}, RGB: {}, TF: {}, Advanced: {} };`,
   "./lib/games": `export const currentGame = () => null;`,
+  "./lib/steamCompat": `export const setWindowsCompatTool = (value) => { globalThis.__tfHooks.steamTool = value; };`,
   "./styles": `export const styles = "";`,
   "./tabs/Compatibility": `export const Compatibility = "Compatibility";`,
+  "./tabs/Updates": `export const Updates = "Updates";`,
   "./tabs/Fans": `export const Fans = "Fans";`,
   "./tabs/Power": `export const Power = "Power";`,
   "./tabs/Settings": `export const Settings = "Settings";`,
@@ -218,6 +220,8 @@ const mountContent = (locale, config = baseConfig) => {
     stateCursor: 0,
     refCursor: 0,
     refs: [],
+    flushTweaks: async (tweaks) => tweaks,
+    readConfig: async () => baseConfig,
   };
   return renderContent();
 };
@@ -229,13 +233,47 @@ const renderContent = () => {
   return Content();
 };
 
+const editedTweaks = { global: { windowsCompatTool: "tool-a", gamescopeFps: 60 }, games: {} };
+const savedTweaks = { ...editedTweaks, global: { ...editedTweaks.global, windowsCompatTool: "tool-b" } };
+const recoveryTree = mountContent("en", { ...baseConfig, tweaks: editedTweaks });
+const recoveryHooks = globalThis.__tfHooks;
+const updateActions = findAll(recoveryTree, (node) => node.type === "Updates")[0].props;
+let recoveryReads = 0;
+let recoveryFails = false;
+recoveryHooks.readConfig = async () => {
+  recoveryReads += 1;
+  if (recoveryFails) throw new Error("recovery read failed");
+  return { ...baseConfig, tweaks: savedTweaks };
+};
+recoveryHooks.flushTweaks = async () => { throw new Error("flush failed"); };
+await assert.rejects(updateActions.withSavedTweaks(() => assert.fail("update started after the failed flush")), /flush failed/);
+assert.equal(recoveryReads, 0);
+assert.equal(recoveryHooks.states[1].tweaks, editedTweaks);
+recoveryHooks.flushTweaks = async (tweaks) => tweaks;
+recoveryFails = true;
+await assert.rejects(updateActions.withSavedTweaks(async () => { throw new Error("delete failed"); }), /delete failed/);
+assert.equal(recoveryHooks.states[1].tweaks, editedTweaks);
+assert.equal(recoveryHooks.states[3], true, "autosave stays paused while saved tweaks are unconfirmed");
+recoveryHooks.flushTweaks = async () => { throw new Error("stale tweaks must not be flushed"); };
+await assert.rejects(updateActions.withSavedTweaks(async () => assert.fail("action ran before recovery succeeded")), /recovery read failed/);
+const compatibilityActions = findAll(renderContent(), (node) => node.type === "Compatibility")[0].props;
+await assert.rejects(compatibilityActions.flushTweaks(editedTweaks), /recovery read failed/);
+assert.equal(recoveryHooks.states[3], true);
+assert.equal(recoveryReads, 3);
+recoveryFails = false;
+await updateActions.withSavedTweaks(async (tweaks) => assert.equal(tweaks, savedTweaks));
+assert.equal(recoveryHooks.states[3], false, "autosave resumes after saved tweaks are reloaded");
+assert.equal(recoveryHooks.states[1].tweaks, savedTweaks);
+assert.equal(recoveryReads, 4);
+assert.equal(recoveryHooks.steamTool, "tool-b");
+
 // The optional pages follow the device flags, and TF stays before Advanced.
 const full = tabsOf(mountContent("en"));
-assert.deepEqual(tabIds(full), ["Compatibility", "Power", "Touch", "Fans", "RGB", "TF", "Advanced"]);
+assert.deepEqual(tabIds(full), ["Compatibility", "Updates", "Power", "Touch", "Fans", "RGB", "TF", "Advanced"]);
 const bare = tabsOf(mountContent("en", { ...baseConfig, fanSupported: false, rgbSupported: false }));
-assert.deepEqual(tabIds(bare), ["Compatibility", "Power", "Touch", "TF", "Advanced"]);
+assert.deepEqual(tabIds(bare), ["Compatibility", "Updates", "Power", "Touch", "TF", "Advanced"]);
 const rgbOnly = tabsOf(mountContent("en", { ...baseConfig, fanSupported: false, rgbSupported: true }));
-assert.deepEqual(tabIds(rgbOnly), ["Compatibility", "Power", "Touch", "RGB", "TF", "Advanced"]);
+assert.deepEqual(tabIds(rgbOnly), ["Compatibility", "Updates", "Power", "Touch", "RGB", "TF", "Advanced"]);
 
 // A fresh default mount: Compatibility is active and the TF page is absent, so
 // no card probe or status poll can run before the tab is opened.

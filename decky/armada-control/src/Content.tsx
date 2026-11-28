@@ -8,6 +8,7 @@ import { useLocale } from "./hooks/useLocale";
 import { t } from "./i18n";
 import { tabIcons } from "./icons";
 import { currentGame } from "./lib/games";
+import { setWindowsCompatTool } from "./lib/steamCompat";
 import { styles } from "./styles";
 import { Compatibility } from "./tabs/Compatibility";
 import { Fans } from "./tabs/Fans";
@@ -17,8 +18,9 @@ import { TfLibraryContent } from "./tf/TfLibraryContent";
 import type { Locale as TfLocale } from "./tf/i18n";
 import { tfText } from "./tf/tf_i18n";
 import { TouchContent } from "./touch/TouchContent";
+import { Updates } from "./tabs/Updates";
 import type { Language as TouchLanguage } from "./touch/i18n";
-import type { Config } from "./types";
+import type { Config, Tweaks } from "./types";
 
 export function Content() {
   // The TF page was written for en/zh only; the other Controller locales keep
@@ -31,6 +33,9 @@ export function Content() {
   const [message, setMessage] = useState("Loading");
   const savedPowerSnapshot = useRef("");
   const savedTweaksSnapshot = useRef("");
+  const updateTweaksPending = useRef(false);
+  const tweaksRecoveryRequired = useRef(false);
+  const [pauseTweaksSave, setPauseTweaksSave] = useState(false);
   const installedGamesRequested = useRef(false);
   const load = useCallback(async () => {
     try {
@@ -88,8 +93,52 @@ export function Content() {
     };
   }, [!!config]);
   useDebouncedSave({ config, field: "power", snapshot: savedPowerSnapshot, save: savePowerConfig, setConfig, onError: load });
-  useDebouncedSave({ config, field: "tweaks", snapshot: savedTweaksSnapshot, save: saveTweaks, setConfig, onError: load });
+  const persistTweaks = useDebouncedSave({
+    config, field: "tweaks", snapshot: savedTweaksSnapshot, save: saveTweaks, setConfig,
+    paused: pauseTweaksSave, onError: () => { if (!updateTweaksPending.current) void load(); },
+  });
   if (!config) return <PanelSection title="Freedom Control"><Field label={message === "Loading" ? t("common.loading") : message} /></PanelSection>;
+  const recoverTweaks = async () => {
+    const current = await getConfig();
+    savedTweaksSnapshot.current = JSON.stringify(current.tweaks);
+    setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
+    setConfig((stored) => stored ? { ...stored, tweaks: current.tweaks, turnipDrivers: current.turnipDrivers } : stored);
+    tweaksRecoveryRequired.current = false;
+    if (!updateTweaksPending.current) setPauseTweaksSave(false);
+    return current.tweaks;
+  };
+  const flushTweaks = (tweaks: Tweaks) => (
+    tweaksRecoveryRequired.current ? recoverTweaks() : persistTweaks(tweaks)
+  );
+  const withSavedTweaks = async (action: (tweaks: Tweaks) => Promise<void>) => {
+    if (updateTweaksPending.current) return;
+    updateTweaksPending.current = true;
+    setPauseTweaksSave(true);
+    try {
+      const saved = await flushTweaks(config.tweaks);
+      try {
+        await action(saved);
+      } catch (error) {
+        tweaksRecoveryRequired.current = true;
+        try {
+          await recoverTweaks();
+        } catch {
+        }
+        throw error;
+      }
+    } finally {
+      updateTweaksPending.current = false;
+      setPauseTweaksSave(tweaksRecoveryRequired.current);
+    }
+  };
+  const applySavedTweaks = (tweaks: Tweaks) => {
+    savedTweaksSnapshot.current = JSON.stringify(tweaks);
+    setConfig((current) => current ? { ...current, tweaks } : current);
+  };
+  const refreshDriverInventory = async () => {
+    const { turnipDrivers } = await getConfig();
+    setConfig((current) => current ? { ...current, turnipDrivers } : current);
+  };
   // The body keeps its automatic height for every page; the Touch page is a
   // normal-flow column that scrolls inside the Controller's own tab panel.
   const tabContent = (content: ReactNode) => (
@@ -102,9 +151,18 @@ export function Content() {
       <style>{styles}</style>
       <Tabs
         activeTab={tab}
-        onShowTab={setTab}
+        onShowTab={(nextTab: string) => { if (!updateTweaksPending.current) setTab(nextTab); }}
         tabs={[
-          { id: "Compatibility", title: tabIcons.Compatibility, content: tabContent(<Compatibility config={config} setConfig={setConfig} />) },
+          { id: "Compatibility", title: tabIcons.Compatibility, content: tabContent(<Compatibility config={config} setConfig={setConfig} flushTweaks={flushTweaks} />) },
+          {
+            id: "Updates",
+            title: (
+              <span role="img" aria-label={t("updates.title")} title={t("updates.title")}>
+                {tabIcons.Updates}
+              </span>
+            ),
+            content: tabContent(<Updates config={config} applySavedTweaks={applySavedTweaks} withSavedTweaks={withSavedTweaks} refreshDriverInventory={refreshDriverInventory} />),
+          },
           { id: "Power", title: tabIcons.Power, content: tabContent(<Power config={config} setConfig={setConfig} />) },
           // Mounted only while its tab is active. The heartbeat and the layout
           // route are owned by the plugin lifecycle, not by this page, so
