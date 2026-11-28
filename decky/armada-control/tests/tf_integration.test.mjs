@@ -137,16 +137,17 @@ export const Tabs = "Tabs";`,
 export const jsx = (type, props) => ({ type, props: props || {} });
 export const jsxs = jsx;
 export const jsxDEV = jsx;`,
-  "./backend": `export const getConfig = async () => ({});
+  "./backend": `export const getConfig = () => globalThis.__tfHooks.readConfig();
 export const getInstalledGames = async () => [];
 export const savePowerConfig = async () => {};
 export const saveTweaks = async () => {};`,
   "./components/RgbLighting": `export const RgbLighting = "RgbLighting";`,
-  "./hooks/useDebouncedSave": `export const useDebouncedSave = () => {};`,
+  "./hooks/useDebouncedSave": `export const useDebouncedSave = ({ field }) => field === "tweaks" ? (tweaks) => globalThis.__tfHooks.flushTweaks(tweaks) : () => {};`,
   "./hooks/useLocale": `export const useLocale = () => globalThis.__tfLocale;`,
   "./i18n": `export const t = (key) => key;`,
   "./icons": `export const tabIcons = { Compatibility: {}, Updates: {}, Power: {}, Touch: {}, Fans: {}, RGB: {}, TF: {}, Advanced: {} };`,
   "./lib/games": `export const currentGame = () => null;`,
+  "./lib/steamCompat": `export const setWindowsCompatTool = (value) => { globalThis.__tfHooks.steamTool = value; };`,
   "./styles": `export const styles = "";`,
   "./tabs/Compatibility": `export const Compatibility = "Compatibility";`,
   "./tabs/Updates": `export const Updates = "Updates";`,
@@ -219,6 +220,8 @@ const mountContent = (locale, config = baseConfig) => {
     stateCursor: 0,
     refCursor: 0,
     refs: [],
+    flushTweaks: async (tweaks) => tweaks,
+    readConfig: async () => baseConfig,
   };
   return renderContent();
 };
@@ -229,6 +232,26 @@ const renderContent = () => {
   hooks.refCursor = 0;
   return Content();
 };
+
+const editedTweaks = { global: { windowsCompatTool: "tool-a", gamescopeFps: 60 }, games: {} };
+const savedTweaks = { ...editedTweaks, global: { ...editedTweaks.global, windowsCompatTool: "tool-b" } };
+const recoveryTree = mountContent("en", { ...baseConfig, tweaks: editedTweaks });
+const recoveryHooks = globalThis.__tfHooks;
+const updateActions = findAll(recoveryTree, (node) => node.type === "Updates")[0].props;
+let recoveryReads = 0;
+recoveryHooks.readConfig = async () => {
+  recoveryReads += 1;
+  return { ...baseConfig, tweaks: savedTweaks };
+};
+recoveryHooks.flushTweaks = async () => { throw new Error("flush failed"); };
+await assert.rejects(updateActions.withSavedTweaks(() => assert.fail("update started after the failed flush")), /flush failed/);
+assert.equal(recoveryReads, 0);
+assert.equal(recoveryHooks.states[1].tweaks, editedTweaks);
+recoveryHooks.flushTweaks = async (tweaks) => tweaks;
+await assert.rejects(updateActions.withSavedTweaks(async () => { throw new Error("action response failed"); }), /action response failed/);
+assert.equal(recoveryReads, 1);
+assert.equal(recoveryHooks.states[1].tweaks, savedTweaks);
+assert.equal(recoveryHooks.steamTool, "tool-b");
 
 // The optional pages follow the device flags, and TF stays before Advanced.
 const full = tabsOf(mountContent("en"));

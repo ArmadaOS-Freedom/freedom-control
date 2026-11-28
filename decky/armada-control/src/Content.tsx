@@ -8,6 +8,7 @@ import { useLocale } from "./hooks/useLocale";
 import { t } from "./i18n";
 import { tabIcons } from "./icons";
 import { currentGame } from "./lib/games";
+import { setWindowsCompatTool } from "./lib/steamCompat";
 import { styles } from "./styles";
 import { Compatibility } from "./tabs/Compatibility";
 import { Fans } from "./tabs/Fans";
@@ -101,11 +102,20 @@ export function Content() {
     updateTweaksPending.current = true;
     setPauseTweaksSave(true);
     try {
-      await action(await flushTweaks(config.tweaks));
-    } catch (error) {
-      savedTweaksSnapshot.current = "\0unconfirmed";
-      await load();
-      throw error;
+      const saved = await flushTweaks(config.tweaks);
+      try {
+        await action(saved);
+      } catch (error) {
+        savedTweaksSnapshot.current = "\0unconfirmed";
+        try {
+          const current = await getConfig();
+          applySavedTweaks(current.tweaks);
+          setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
+          setConfig((stored) => stored ? { ...stored, turnipDrivers: current.turnipDrivers } : stored);
+        } catch {
+        }
+        throw error;
+      }
     } finally {
       updateTweaksPending.current = false;
       setPauseTweaksSave(false);

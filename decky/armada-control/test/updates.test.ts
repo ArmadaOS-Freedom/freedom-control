@@ -73,10 +73,12 @@ test("local update buttons keep selection and deletion recovery from overlapping
       saveTweaks(tweaks) { savedTweaks = tweaks; return savePending; },
       async deleteLocalUpdate(_kind, id) {
         removalAttempt = id;
-        if (failRemoval) throw new Error("Could not remove driver");
+        if (failRemoval) {
+          await recoveryPending;
+          throw new Error("Could not remove driver");
+        }
         return { selectionCleared: false, removed: true };
       },
-      getConfig() { return recoveryPending; },
       async installUpdate(id) { installedId = id; return onlineDriver; },
       async getUpdates() { return catalog; },
       async getLocalUpdates() { localReads += 1; return drivers; },

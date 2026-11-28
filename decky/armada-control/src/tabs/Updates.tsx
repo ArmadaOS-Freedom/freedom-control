@@ -1,6 +1,6 @@
 import { ButtonItem, DialogBody, DialogButton, DialogFooter, Field, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 import { useEffect, useRef, useState } from "react";
-import { deleteLocalUpdate, getConfig, getLocalUpdates, getUpdateProgress, getUpdates, installUpdate, refreshUpdates, restartGameMode, saveTweaks } from "../backend";
+import { deleteLocalUpdate, getLocalUpdates, getUpdateProgress, getUpdates, installUpdate, refreshUpdates, restartGameMode, saveTweaks } from "../backend";
 import { ArmadaModalRoot } from "../components/ArmadaModalRoot";
 import { t } from "../i18n";
 import { getProtonTools, setWindowsCompatTool } from "../lib/steamCompat";
@@ -144,12 +144,6 @@ export function Updates({ config, applySavedTweaks, withSavedTweaks, refreshDriv
         } catch (error) {
           try {
             setLocal(await getLocalUpdates());
-          } catch {
-          }
-          try {
-            const current = await getConfig();
-            applySavedTweaks(current.tweaks);
-            setWindowsCompatTool(current.tweaks.global.windowsCompatTool || undefined);
           } catch {
           }
           throw error;

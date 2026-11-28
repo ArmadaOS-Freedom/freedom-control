@@ -160,10 +160,31 @@ class Plugin:
                 try:
                     result = await asyncio.to_thread(delete_local, kind, update_id, installed_name if kind == "compatibility" else None)
                 except Exception:
-                    package_name = installed_name.removeprefix("user:") if kind == "turnip" else installed_name
-                    store = update_module.TURNIP_DIR if kind == "turnip" else update_module.COMPAT_DIR
-                    if await asyncio.to_thread(update_module._valid_install, store / package_name, kind):
-                        await asyncio.to_thread(save_tweaks, tweaks)
+                    def restore_selection():
+                        store = update_module.TURNIP_DIR if kind == "turnip" else update_module.COMPAT_DIR
+                        package_name = installed_name.removeprefix("user:") if kind == "turnip" else installed_name
+                        if not update_module._safe_id(package_name):
+                            return
+                        store = update_module._safe_store(store)
+                        if not store.is_dir():
+                            return
+                        with update_module._installation_lock(store):
+                            package_path = store / package_name
+                            if not update_module._valid_install(package_path, kind):
+                                return
+                            if kind == "compatibility" and (
+                                update_module._compat_catalog_id(package_path) != update_id
+                                or update_module._compat_tool_id(package_path) != selected
+                            ):
+                                return
+                            if kind == "turnip" and selected != package_name:
+                                return
+                            save_tweaks(tweaks)
+
+                    try:
+                        await asyncio.to_thread(restore_selection)
+                    except Exception:
+                        logger.exception("Failed to restore the package selection")
                     raise
                 result["selectionCleared"] = True
             else:
