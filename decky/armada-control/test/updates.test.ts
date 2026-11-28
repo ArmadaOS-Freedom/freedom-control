@@ -171,6 +171,7 @@ store = home / ".steam/root/compatibilitytools.d"
 store.mkdir(parents=True)
 module.HOME = home
 module.COMPAT_DIR = store
+module.os.geteuid = lambda: 1000
 target = store / "shared-name"
 target.mkdir()
 (target / ".armada-control-update.json").write_text(json.dumps({"catalogId": "catalog-one"}))
